@@ -23,7 +23,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'Patriot Payments GHL Integration Server Running', version: '1.0.0' });
 });
 
-// OAUTH CALLBACK — FIXED
+// OAUTH CALLBACK
 app.get('/oauth/callback', async (req, res) => {
   const { code } = req.query;
 
@@ -32,7 +32,6 @@ app.get('/oauth/callback', async (req, res) => {
   }
 
   try {
-    // FIXED: Use URLSearchParams with x-www-form-urlencoded content type
     const params = new URLSearchParams();
     params.append('client_id', GHL_CLIENT_ID);
     params.append('client_secret', GHL_CLIENT_SECRET);
@@ -63,7 +62,6 @@ app.get('/oauth/callback', async (req, res) => {
 
     console.log(`OAuth complete for location: ${locationId}`);
 
-    // Show success page instead of redirect
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -226,6 +224,127 @@ app.post('/setup/save', (req, res) => {
   res.json({ success: true });
 });
 
+// GETTING STARTED GUIDE
+app.get('/getting-started', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Patriot Payments — Getting Started</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        body { background: #f5f7fa; padding: 24px; color: #333; }
+        .header { background: #1B3A6B; border-radius: 12px; padding: 28px; text-align: center; margin-bottom: 24px; }
+        .header h1 { color: white; font-size: 22px; margin-bottom: 6px; }
+        .header p { color: #AACCE8; font-size: 14px; }
+        .step { display: flex; gap: 16px; background: white; border-radius: 10px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); align-items: flex-start; }
+        .step-num { background: #1B3A6B; color: white; font-size: 20px; font-weight: 700; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .step-content h3 { color: #1B3A6B; font-size: 16px; margin-bottom: 6px; }
+        .step-content p { color: #555; font-size: 14px; line-height: 1.6; }
+        .step-content .url { color: #C0392B; font-size: 12px; margin-top: 6px; font-style: italic; }
+        .info-box { background: #FFF8E1; border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; border-left: 4px solid #C0392B; }
+        .info-box h3 { color: #1B3A6B; font-size: 15px; margin-bottom: 10px; }
+        .info-box li { color: #444; font-size: 14px; margin-bottom: 6px; list-style: none; padding-left: 4px; }
+        .test-box { background: white; border-radius: 10px; padding: 20px; margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .test-box h3 { color: #1B3A6B; font-size: 16px; margin-bottom: 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th { background: #1B3A6B; color: white; padding: 8px 12px; text-align: left; }
+        td { padding: 8px 12px; border-bottom: 1px solid #eee; color: #444; }
+        tr:nth-child(even) td { background: #f9f9f9; }
+        .contact { background: #1B3A6B; border-radius: 12px; padding: 24px; text-align: center; }
+        .contact h3 { color: white; font-size: 16px; margin-bottom: 12px; }
+        .contact p { color: #AACCE8; font-size: 14px; margin-bottom: 6px; }
+        .faq { background: white; border-radius: 10px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .faq h4 { color: #1B3A6B; font-size: 15px; margin-bottom: 8px; }
+        .faq p { color: #555; font-size: 14px; line-height: 1.6; }
+        h2 { color: #1B3A6B; font-size: 18px; margin: 24px 0 12px; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>🇺🇸 Patriot Payments × GoHighLevel</h1>
+        <p>Get connected and start accepting payments in 3 simple steps</p>
+      </div>
+      <div class="info-box">
+        <h3>📋 Before You Begin — What You Need:</h3>
+        <ul>
+          <li>✅ An active Patriot Payments merchant account</li>
+          <li>✅ Your Accept Blue API Key (provided by Patriot Payments)</li>
+          <li>✅ Your Accept Blue Source Key / PIN</li>
+          <li>✅ A GoHighLevel sub-account</li>
+        </ul>
+        <p style="margin-top:10px;font-size:13px;color:#888;">Don't have an account yet? Call <strong>(941) 367-5076</strong> or visit <strong>patriotspayments.com</strong></p>
+      </div>
+      <h2>How to Get Connected</h2>
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <h3>Install the Patriot Payments App</h3>
+          <p>Go to the GoHighLevel App Marketplace, find Patriot Payments, and click Install. Select your sub-account and click Allow to authorize the connection.</p>
+          <p class="url">app.gohighlevel.com → App Marketplace → Patriot Payments → Install</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <h3>Connect Your Merchant Credentials</h3>
+          <p>The setup page opens automatically after installation. Select Test Mode to test first, or Live Mode for real payments. Enter your Accept Blue API Key and Source Key, then click Connect Patriot Payments.</p>
+          <p class="url">Look for the green "Successfully connected!" confirmation message</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <h3>Start Accepting Payments</h3>
+          <p>You're all set! Patriot Payments now appears as a payment option in GoHighLevel. Use it for invoices, funnels, order forms, and subscriptions — all powered by Accept Blue.</p>
+          <p class="url">Payments → Settings → Payment Integrations in your GHL sub-account</p>
+        </div>
+      </div>
+      <div class="test-box">
+        <h3>🧪 Test Card Details (Sandbox Mode)</h3>
+        <table>
+          <tr><th>Field</th><th>Test Value</th></tr>
+          <tr><td>Card Number</td><td>4111 1111 1111 1111</td></tr>
+          <tr><td>Expiration</td><td>12/26</td></tr>
+          <tr><td>CVV</td><td>123</td></tr>
+          <tr><td>Amount</td><td>Any amount works</td></tr>
+        </table>
+        <p style="margin-top:12px;font-size:13px;color:#888;">When ready to go live, return to the setup page, switch to Live Mode, and enter your production credentials.</p>
+      </div>
+      <h2>Frequently Asked Questions</h2>
+      <div class="faq">
+        <h4>Do I need a Patriot Payments account to use this app?</h4>
+        <p>Yes. You need an active merchant account with Accept Blue credentials. Call (941) 367-5076 to get set up — no contracts required.</p>
+      </div>
+      <div class="faq">
+        <h4>What payment types are supported?</h4>
+        <p>One-time payments, recurring subscriptions, and off-session charges. Visa, Mastercard, American Express, Discover, and eCheck/ACH are all accepted.</p>
+      </div>
+      <div class="faq">
+        <h4>Is there a fee to use the GHL integration?</h4>
+        <p>No. The app is completely free to install. You only pay your standard Patriot Payments processing rates on transactions.</p>
+      </div>
+      <div class="faq">
+        <h4>How do I switch from Test Mode to Live Mode?</h4>
+        <p>Return to the setup page, click Live Mode, enter your production API key and source key, and click Connect.</p>
+      </div>
+      <div class="faq">
+        <h4>Where can I view my transactions?</h4>
+        <p>In your Accept Blue merchant dashboard and inside GoHighLevel under Payments → Transactions.</p>
+      </div>
+      <br/>
+      <div class="contact">
+        <h3>Need Help? We're Here.</h3>
+        <p>📞 (941) 367-5076</p>
+        <p>🌐 patriotspayments.com</p>
+        <p style="margin-top:12px;color:#CCDDEE;font-size:13px;">No contracts. Transparent pricing. Built for small businesses.</p>
+      </div>
+      <br/>
+    </body>
+    </html>
+  `);
+});
+
 // QUERY URL
 app.post('/payments/query', async (req, res) => {
   const incomingApiKey = req.headers['x-api-key'] || req.body.apiKey;
@@ -336,6 +455,7 @@ app.post('/payments/process', async (req, res) => {
   }
 });
 
+// START SERVER — THIS MUST ALWAYS BE LAST
 app.listen(PORT, () => {
   console.log(`Patriot Payments GHL Server running on port ${PORT}`);
 });
