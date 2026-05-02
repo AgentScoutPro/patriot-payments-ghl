@@ -1,6 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 
 app.use(express.json());
@@ -13,17 +15,45 @@ const {
   ACCEPT_BLUE_API_KEY_SANDBOX,
   API_KEY,
   SSO_KEY,
+  BASE_URL,
   PORT = 3000
 } = process.env;
 
-const locationStore = {};
+// ─── PERSISTENT LOCATION STORE ───────────────────────────────────────────────
+// Persists to disk so tokens survive Render restarts/spin-downs
+const STORE_PATH = path.join('/tmp', 'location_store.json');
 
-// HEALTH CHECK
+function loadStore() {
+  try {
+    if (fs.existsSync(STORE_PATH)) {
+      return JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to load store:', e.message);
+  }
+  return {};
+}
+
+function saveStore(store) {
+  try {
+    fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+  } catch (e) {
+    console.error('Failed to save store:', e.message);
+  }
+}
+
+let locationStore = loadStore();
+
+// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ status: 'Patriot Payments GHL Integration Server Running', version: '1.0.0' });
+  res.json({
+    status: 'Patriot Payments GHL Integration Server Running',
+    version: '2.0.0',
+    locations_connected: Object.keys(locationStore).length
+  });
 });
 
-// OAUTH CALLBACK
+// ─── OAUTH CALLBACK ───────────────────────────────────────────────────────────
 app.get('/oauth/callback', async (req, res) => {
   const { code } = req.query;
 
@@ -32,12 +62,13 @@ app.get('/oauth/callback', async (req, res) => {
   }
 
   try {
+    // Step 1: Exchange code for access token
     const params = new URLSearchParams();
     params.append('client_id', GHL_CLIENT_ID);
     params.append('client_secret', GHL_CLIENT_SECRET);
     params.append('grant_type', 'authorization_code');
     params.append('code', code);
-    params.append('redirect_uri', `${process.env.BASE_URL}/oauth/callback`);
+    params.append('redirect_uri', `${BASE_URL}/oauth/callback`);
 
     const tokenResponse = await axios.post(
       'https://services.leadconnectorhq.com/oauth/token',
@@ -52,6 +83,7 @@ app.get('/oauth/callback', async (req, res) => {
 
     const { access_token, refresh_token, locationId, companyId } = tokenResponse.data;
 
+    // Step 2: Store tokens
     locationStore[locationId] = {
       access_token,
       refresh_token,
@@ -59,8 +91,19 @@ app.get('/oauth/callback', async (req, res) => {
       locationId,
       connected_at: new Date().toISOString()
     };
+    saveStore(locationStore);
 
     console.log(`OAuth complete for location: ${locationId}`);
+
+    // Step 3: CREATE PROVIDER CONFIG — this is what makes the app appear
+    // under Payments > Integrations in GHL
+    try {
+      await createProviderConfig(locationId, access_token);
+      console.log(`Provider config created for location: ${locationId}`);
+    } catch (providerErr) {
+      // Log but don't fail the OAuth flow — provider config can be retried
+      console.error('Provider config creation failed:', providerErr?.response?.data || providerErr.message);
+    }
 
     res.send(`
       <!DOCTYPE html>
@@ -117,31 +160,82 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// INSTALL WEBHOOK
+// ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
+// This is the missing piece — registers Patriot Payments under
+// Payments > Integrations in the GHL sub-account
+async function createProviderConfig(locationId, accessToken) {
+  const providerPayload = {
+    name: 'Patriot Payments',
+    description: 'Accept credit cards, debit cards, and ACH payments powered by Accept Blue. No contracts. Transparent pricing.',
+    imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
+    locationId: locationId,
+    queryUrl: `${BASE_URL}/payments/query`,
+    paymentsUrl: `${BASE_URL}/payments/checkout`,
+    setupUrl: `${BASE_URL}/setup`,
+    liveConfig: {
+      apiKey: API_KEY,
+      mode: 'live'
+    },
+    testConfig: {
+      apiKey: API_KEY,
+      mode: 'test'
+    }
+  };
+
+  const response = await axios.post(
+    `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+    providerPayload,
+    {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Version': '2021-07-28'
+      }
+    }
+  );
+
+  // Store provider ID for this location
+  if (locationStore[locationId]) {
+    locationStore[locationId].providerId = response.data?.id;
+    saveStore(locationStore);
+  }
+
+  return response.data;
+}
+
+// ─── INSTALL WEBHOOK ──────────────────────────────────────────────────────────
 app.post('/webhooks/install', (req, res) => {
   const { locationId, companyId } = req.body;
   console.log(`App installed for location: ${locationId}`);
   if (!locationStore[locationId]) {
-    locationStore[locationId] = { locationId, companyId, installed_at: new Date().toISOString() };
+    locationStore[locationId] = {
+      locationId,
+      companyId,
+      installed_at: new Date().toISOString()
+    };
+    saveStore(locationStore);
   }
   res.status(200).json({ success: true });
 });
 
-// UNINSTALL WEBHOOK
+// ─── UNINSTALL WEBHOOK ────────────────────────────────────────────────────────
 app.post('/webhooks/uninstall', (req, res) => {
   const { locationId } = req.body;
   console.log(`App uninstalled for location: ${locationId}`);
-  if (locationStore[locationId]) delete locationStore[locationId];
+  if (locationStore[locationId]) {
+    delete locationStore[locationId];
+    saveStore(locationStore);
+  }
   res.status(200).json({ success: true });
 });
 
-// WEBHOOKS DEFAULT
+// ─── WEBHOOKS DEFAULT ─────────────────────────────────────────────────────────
 app.post('/webhooks', (req, res) => {
   console.log('Webhook received:', JSON.stringify(req.body));
   res.status(200).json({ success: true });
 });
 
-// SETUP PAGE
+// ─── SETUP PAGE ───────────────────────────────────────────────────────────────
 app.get('/setup', (req, res) => {
   const { sso_token } = req.query;
   res.send(`
@@ -217,14 +311,52 @@ app.get('/setup', (req, res) => {
   `);
 });
 
-// SAVE CREDENTIALS
+// ─── SAVE CREDENTIALS ─────────────────────────────────────────────────────────
 app.post('/setup/save', (req, res) => {
   const { apiKey, sourceKey, mode, ssoToken } = req.body;
-  console.log(`Credentials saved for mode: ${mode}`);
+
+  // Decrypt SSO token to get locationId
+  let locationId = null;
+  try {
+    if (ssoToken && SSO_KEY) {
+      const decrypted = decryptSSOToken(ssoToken);
+      locationId = decrypted?.activeLocation;
+    }
+  } catch (e) {
+    console.error('SSO decrypt error:', e.message);
+  }
+
+  if (locationId && locationStore[locationId]) {
+    locationStore[locationId].acceptBlueApiKey = apiKey;
+    locationStore[locationId].acceptBlueSourceKey = sourceKey;
+    locationStore[locationId].mode = mode;
+    saveStore(locationStore);
+    console.log(`Credentials saved for location: ${locationId}, mode: ${mode}`);
+  } else {
+    console.log(`Credentials saved (no location context), mode: ${mode}`);
+  }
+
   res.json({ success: true });
 });
 
-// GETTING STARTED GUIDE
+// ─── SSO TOKEN DECRYPTION ─────────────────────────────────────────────────────
+function decryptSSOToken(token) {
+  try {
+    const key = crypto.createHash('sha256').update(SSO_KEY).digest();
+    const encryptedBuffer = Buffer.from(token, 'base64');
+    const iv = encryptedBuffer.slice(0, 16);
+    const encrypted = encryptedBuffer.slice(16);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    let decrypted = decipher.update(encrypted, undefined, 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  } catch (e) {
+    console.error('SSO decrypt failed:', e.message);
+    return null;
+  }
+}
+
+// ─── GETTING STARTED GUIDE ────────────────────────────────────────────────────
 app.get('/getting-started', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -241,23 +373,9 @@ app.get('/getting-started', (req, res) => {
         .step-num { background: #1B3A6B; color: white; font-size: 20px; font-weight: 700; width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
         .step-content h3 { color: #1B3A6B; font-size: 16px; margin-bottom: 6px; }
         .step-content p { color: #555; font-size: 14px; line-height: 1.6; }
-        .step-content .url { color: #C0392B; font-size: 12px; margin-top: 6px; font-style: italic; }
-        .info-box { background: #FFF8E1; border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; border-left: 4px solid #C0392B; }
-        .info-box h3 { color: #1B3A6B; font-size: 15px; margin-bottom: 10px; }
-        .info-box li { color: #444; font-size: 14px; margin-bottom: 6px; list-style: none; padding-left: 4px; }
-        .test-box { background: white; border-radius: 10px; padding: 20px; margin-bottom: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-        .test-box h3 { color: #1B3A6B; font-size: 16px; margin-bottom: 12px; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th { background: #1B3A6B; color: white; padding: 8px 12px; text-align: left; }
-        td { padding: 8px 12px; border-bottom: 1px solid #eee; color: #444; }
-        tr:nth-child(even) td { background: #f9f9f9; }
         .contact { background: #1B3A6B; border-radius: 12px; padding: 24px; text-align: center; }
         .contact h3 { color: white; font-size: 16px; margin-bottom: 12px; }
         .contact p { color: #AACCE8; font-size: 14px; margin-bottom: 6px; }
-        .faq { background: white; border-radius: 10px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-        .faq h4 { color: #1B3A6B; font-size: 15px; margin-bottom: 8px; }
-        .faq p { color: #555; font-size: 14px; line-height: 1.6; }
-        h2 { color: #1B3A6B; font-size: 18px; margin: 24px 0 12px; }
       </style>
     </head>
     <body>
@@ -265,87 +383,39 @@ app.get('/getting-started', (req, res) => {
         <h1>🇺🇸 Patriot Payments × GoHighLevel</h1>
         <p>Get connected and start accepting payments in 3 simple steps</p>
       </div>
-      <div class="info-box">
-        <h3>📋 Before You Begin — What You Need:</h3>
-        <ul>
-          <li>✅ An active Patriot Payments merchant account</li>
-          <li>✅ Your Accept Blue API Key (provided by Patriot Payments)</li>
-          <li>✅ Your Accept Blue Source Key / PIN</li>
-          <li>✅ A GoHighLevel sub-account</li>
-        </ul>
-        <p style="margin-top:10px;font-size:13px;color:#888;">Don't have an account yet? Call <strong>(941) 367-5076</strong> or visit <strong>patriotspayments.com</strong></p>
-      </div>
-      <h2>How to Get Connected</h2>
       <div class="step">
         <div class="step-num">1</div>
         <div class="step-content">
           <h3>Install the Patriot Payments App</h3>
-          <p>Go to the GoHighLevel App Marketplace, find Patriot Payments, and click Install. Select your sub-account and click Allow to authorize the connection.</p>
-          <p class="url">app.gohighlevel.com → App Marketplace → Patriot Payments → Install</p>
+          <p>Go to the GoHighLevel App Marketplace, find Patriot Payments, and click Install.</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">2</div>
         <div class="step-content">
           <h3>Connect Your Merchant Credentials</h3>
-          <p>The setup page opens automatically after installation. Select Test Mode to test first, or Live Mode for real payments. Enter your Accept Blue API Key and Source Key, then click Connect Patriot Payments.</p>
-          <p class="url">Look for the green "Successfully connected!" confirmation message</p>
+          <p>Enter your Accept Blue API Key and Source Key. Select Test or Live mode.</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">3</div>
         <div class="step-content">
           <h3>Start Accepting Payments</h3>
-          <p>You're all set! Patriot Payments now appears as a payment option in GoHighLevel. Use it for invoices, funnels, order forms, and subscriptions — all powered by Accept Blue.</p>
-          <p class="url">Payments → Settings → Payment Integrations in your GHL sub-account</p>
+          <p>Patriot Payments now appears under Payments > Integrations in your GHL account.</p>
         </div>
-      </div>
-      <div class="test-box">
-        <h3>🧪 Test Card Details (Sandbox Mode)</h3>
-        <table>
-          <tr><th>Field</th><th>Test Value</th></tr>
-          <tr><td>Card Number</td><td>4111 1111 1111 1111</td></tr>
-          <tr><td>Expiration</td><td>12/26</td></tr>
-          <tr><td>CVV</td><td>123</td></tr>
-          <tr><td>Amount</td><td>Any amount works</td></tr>
-        </table>
-        <p style="margin-top:12px;font-size:13px;color:#888;">When ready to go live, return to the setup page, switch to Live Mode, and enter your production credentials.</p>
-      </div>
-      <h2>Frequently Asked Questions</h2>
-      <div class="faq">
-        <h4>Do I need a Patriot Payments account to use this app?</h4>
-        <p>Yes. You need an active merchant account with Accept Blue credentials. Call (941) 367-5076 to get set up — no contracts required.</p>
-      </div>
-      <div class="faq">
-        <h4>What payment types are supported?</h4>
-        <p>One-time payments, recurring subscriptions, and off-session charges. Visa, Mastercard, American Express, Discover, and eCheck/ACH are all accepted.</p>
-      </div>
-      <div class="faq">
-        <h4>Is there a fee to use the GHL integration?</h4>
-        <p>No. The app is completely free to install. You only pay your standard Patriot Payments processing rates on transactions.</p>
-      </div>
-      <div class="faq">
-        <h4>How do I switch from Test Mode to Live Mode?</h4>
-        <p>Return to the setup page, click Live Mode, enter your production API key and source key, and click Connect.</p>
-      </div>
-      <div class="faq">
-        <h4>Where can I view my transactions?</h4>
-        <p>In your Accept Blue merchant dashboard and inside GoHighLevel under Payments → Transactions.</p>
       </div>
       <br/>
       <div class="contact">
-        <h3>Need Help? We're Here.</h3>
+        <h3>Need Help?</h3>
         <p>📞 (941) 367-5076</p>
         <p>🌐 patriotspayments.com</p>
-        <p style="margin-top:12px;color:#CCDDEE;font-size:13px;">No contracts. Transparent pricing. Built for small businesses.</p>
       </div>
-      <br/>
     </body>
     </html>
   `);
 });
 
-// QUERY URL
+// ─── QUERY URL ────────────────────────────────────────────────────────────────
 app.post('/payments/query', async (req, res) => {
   const incomingApiKey = req.headers['x-api-key'] || req.body.apiKey;
   if (incomingApiKey !== API_KEY) {
@@ -364,7 +434,7 @@ app.post('/payments/query', async (req, res) => {
   }
 });
 
-// CHECKOUT PAGE
+// ─── CHECKOUT PAGE ────────────────────────────────────────────────────────────
 app.get('/payments/checkout', (req, res) => {
   const { amount, locationId, invoiceId } = req.query;
   res.send(`
@@ -431,7 +501,7 @@ app.get('/payments/checkout', (req, res) => {
   `);
 });
 
-// PROCESS PAYMENT
+// ─── PROCESS PAYMENT ──────────────────────────────────────────────────────────
 app.post('/payments/process', async (req, res) => {
   const { cardNumber, expiry, cvv, name, amount, locationId } = req.body;
   try {
@@ -440,7 +510,13 @@ app.post('/payments/process', async (req, res) => {
     const apiKey = locationData.acceptBlueApiKey || ACCEPT_BLUE_API_KEY;
     const response = await axios.post('https://api.accept.blue/api/v2/transactions/charge', {
       amount: parseFloat(amount),
-      card: { number: cardNumber, expiry_month: parseInt(expMonth), expiry_year: parseInt('20' + expYear), cvv2: cvv, name }
+      card: {
+        number: cardNumber,
+        expiry_month: parseInt(expMonth),
+        expiry_year: parseInt('20' + expYear),
+        cvv2: cvv,
+        name
+      }
     }, {
       headers: {
         'Authorization': `Basic ${Buffer.from(apiKey + ':').toString('base64')}`,
@@ -455,7 +531,7 @@ app.post('/payments/process', async (req, res) => {
   }
 });
 
-// START SERVER — THIS MUST ALWAYS BE LAST
+// ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.0 running on port ${PORT}`);
 });
