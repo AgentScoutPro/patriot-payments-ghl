@@ -508,7 +508,7 @@ app.post('/payments/process', async (req, res) => {
     const [expMonth, expYear] = expiry.split('/');
     const locationData = locationStore[locationId] || {};
     const apiKey = locationData.acceptBlueApiKey || ACCEPT_BLUE_API_KEY;
-    const response = await axios.post('https://api.accept.blue/api/v2/transactions/charge', {
+    const ACCEPT_BLUE_BASE_URL = process.env.ACCEPT_BLUE_BASE_URL || 'https://api.accept.blue/api/v2'; const response = await axios.post(`${ACCEPT_BLUE_BASE_URL}/transactions/charge`, {
       amount: parseFloat(amount),
       card: {
         number: cardNumber,
