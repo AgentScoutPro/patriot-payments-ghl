@@ -44,7 +44,7 @@ let locationStore = loadStore();
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '2.3.0',
+    version: '2.4.0',
     locations_connected: Object.keys(locationStore).length,
     base_url: BASE_URL
   });
@@ -87,7 +87,9 @@ async function getLocationToken(companyToken, companyId, locationId) {
   return response.data?.access_token || response.data?.token;
 }
 
-// ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
+// ─── UPSERT PROVIDER CONFIG ───────────────────────────────────────────────────
+// GHL returns 403 if provider config already exists — so we check first,
+// then update (PUT) if it exists, or create (POST) if it doesn't
 async function createProviderConfig(locationId, locationToken) {
   const providerPayload = {
     name: 'Patriot Payments',
@@ -99,20 +101,48 @@ async function createProviderConfig(locationId, locationToken) {
     testMode: { apiKey: API_KEY }
   };
 
-  console.log('Creating provider config for locationId:', locationId);
+  const headers = {
+    'Authorization': `Bearer ${locationToken}`,
+    'Content-Type': 'application/json',
+    'Version': '2021-07-28'
+  };
 
+  // Step 1: Check if provider config already exists
+  console.log('Checking for existing provider config for locationId:', locationId);
+  try {
+    const existing = await axios.get(
+      `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+      { headers }
+    );
+    console.log('Existing provider response:', JSON.stringify(existing.data));
+
+    const existingProvider = existing.data?.provider || existing.data;
+    const providerId = existingProvider?._id || existingProvider?.id;
+
+    if (providerId) {
+      // Provider exists — update it with PUT
+      console.log(`Provider already exists (id: ${providerId}) — updating with PUT`);
+      const updateResponse = await axios.put(
+        `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+        providerPayload,
+        { headers }
+      );
+      console.log('Provider UPDATE success:', JSON.stringify(updateResponse.data));
+      return updateResponse.data;
+    }
+  } catch (checkErr) {
+    const status = checkErr?.response?.status;
+    console.log(`GET provider check status: ${status} — proceeding to create`);
+  }
+
+  // Step 2: Create new provider config
+  console.log('Creating NEW provider config for locationId:', locationId);
   const response = await axios.post(
     `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
     providerPayload,
-    {
-      headers: {
-        'Authorization': `Bearer ${locationToken}`,
-        'Content-Type': 'application/json',
-        'Version': '2021-07-28'
-      }
-    }
+    { headers }
   );
-
+  console.log('Provider CREATE success:', JSON.stringify(response.data));
   return response.data;
 }
 
@@ -467,7 +497,7 @@ app.post('/payments/process', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v2.3 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.4 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
 });
