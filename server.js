@@ -44,7 +44,7 @@ let locationStore = loadStore();
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '2.5.0',
+    version: '2.6.0',
     locations_connected: Object.keys(locationStore).length,
     base_url: BASE_URL
   });
@@ -301,34 +301,67 @@ app.get('/oauth/callback', async (req, res) => {
   }
 });
 
-// ─── INSTALL WEBHOOK — handles individual location installs after bulk ─────────
+// ─── INSTALL WEBHOOK — PRIMARY path for location-level provider config ────────
+// GHL sends this webhook for every location install — this is the most reliable
+// way to get a location token because it fires AFTER the install completes
 app.post('/webhooks/install', async (req, res) => {
-  const { locationId, companyId } = req.body;
-  console.log(`Install webhook: locationId=${locationId}, companyId=${companyId}`);
-
-  // Try to get location token using stored company token
-  const companyData = locationStore[`company_${companyId}`];
-  if (companyData?.access_token && locationId) {
-    try {
-      const locationToken = await getLocationToken(companyData.access_token, companyId, locationId);
-      if (locationToken) {
-        locationStore[locationId] = { access_token: locationToken, companyId, locationId, installed_at: new Date().toISOString() };
-        saveStore(locationStore);
-        const providerResult = await createProviderConfig(locationId, locationToken);
-        locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
-        saveStore(locationStore);
-        console.log(`Webhook install: provider config created for ${locationId}`);
-      }
-    } catch (e) {
-      console.error(`Webhook install failed for ${locationId}:`, JSON.stringify(e?.response?.data || e.message));
-    }
-  } else {
-    if (!locationStore[locationId]) {
-      locationStore[locationId] = { locationId, companyId, installed_at: new Date().toISOString() };
-      saveStore(locationStore);
-    }
-  }
+  // Respond immediately so GHL doesn't timeout
   res.status(200).json({ success: true });
+
+  const body = req.body;
+  console.log('=== INSTALL WEBHOOK ===');
+  console.log(JSON.stringify(body, null, 2));
+
+  const locationId = body.locationId;
+  const companyId = body.companyId;
+
+  if (!locationId || !companyId) {
+    console.log('Webhook missing locationId or companyId — skipping');
+    return;
+  }
+
+  console.log(`Processing install webhook: locationId=${locationId}, companyId=${companyId}`);
+
+  // Get stored company token
+  const companyData = locationStore[`company_${companyId}`];
+  if (!companyData?.access_token) {
+    console.error(`No company token found for companyId: ${companyId}`);
+    console.log('Available keys:', Object.keys(locationStore));
+    return;
+  }
+
+  // Small delay to ensure GHL has completed install on their end
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  try {
+    console.log(`Getting location token for ${locationId}...`);
+    const locationToken = await getLocationToken(companyData.access_token, companyId, locationId);
+
+    if (!locationToken) {
+      console.error(`No location token returned for ${locationId}`);
+      return;
+    }
+
+    console.log(`Got location token for ${locationId} ✅`);
+
+    locationStore[locationId] = {
+      access_token: locationToken,
+      companyId,
+      locationId,
+      installed_at: new Date().toISOString()
+    };
+    saveStore(locationStore);
+
+    // Create or update provider config
+    const providerResult = await createProviderConfig(locationId, locationToken);
+    locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+    saveStore(locationStore);
+    console.log(`✅ Provider config complete for ${locationId}:`, JSON.stringify(providerResult));
+
+  } catch (e) {
+    console.error(`Webhook install FAILED for ${locationId}:`, JSON.stringify(e?.response?.data || e.message));
+    console.error('Status:', e?.response?.status);
+  }
 });
 
 app.post('/webhooks/uninstall', (req, res) => {
@@ -338,8 +371,41 @@ app.post('/webhooks/uninstall', (req, res) => {
   res.status(200).json({ success: true });
 });
 
-app.post('/webhooks', (req, res) => {
-  console.log('Webhook:', JSON.stringify(req.body));
+app.post('/webhooks', async (req, res) => {
+  const body = req.body;
+  console.log('=== Generic Webhook ===', JSON.stringify(body));
+
+  // Route install events to install handler logic
+  if (body.type === 'INSTALL' && body.locationId) {
+    res.status(200).json({ success: true });
+
+    const locationId = body.locationId;
+    const companyId = body.companyId;
+    const companyData = locationStore[`company_${companyId}`];
+
+    if (!companyData?.access_token) {
+      console.error(`No company token for companyId: ${companyId}`);
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    try {
+      const locationToken = await getLocationToken(companyData.access_token, companyId, locationId);
+      if (locationToken) {
+        locationStore[locationId] = { access_token: locationToken, companyId, locationId, installed_at: new Date().toISOString() };
+        saveStore(locationStore);
+        const result = await createProviderConfig(locationId, locationToken);
+        locationStore[locationId].providerId = result?.id || result?._id;
+        saveStore(locationStore);
+        console.log(`✅ Provider config via generic webhook for ${locationId}`);
+      }
+    } catch (e) {
+      console.error(`Generic webhook install failed:`, JSON.stringify(e?.response?.data || e.message));
+    }
+    return;
+  }
+
   res.status(200).json({ success: true });
 });
 
@@ -497,7 +563,7 @@ app.post('/payments/process', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v2.5 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.6 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
 });
