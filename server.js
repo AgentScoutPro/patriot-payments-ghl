@@ -44,7 +44,7 @@ let locationStore = loadStore();
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '2.4.0',
+    version: '2.5.0',
     locations_connected: Object.keys(locationStore).length,
     base_url: BASE_URL
   });
@@ -97,8 +97,8 @@ async function createProviderConfig(locationId, locationToken) {
     paymentsUrl: `${BASE_URL}/payments/checkout`,
     queryUrl: `${BASE_URL}/payments/query`,
     imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
-    liveMode: { apiKey: API_KEY },
-    testMode: { apiKey: API_KEY }
+    liveMode: { apiKey: process.env.ACCEPT_BLUE_API_KEY },
+    testMode: { apiKey: process.env.ACCEPT_BLUE_API_KEY_SANDBOX }
   };
 
   const headers = {
@@ -497,7 +497,7 @@ app.post('/payments/process', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v2.4 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.5 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
 });
