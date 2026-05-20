@@ -13,14 +13,16 @@ const {
   GHL_CLIENT_SECRET,
   ACCEPT_BLUE_API_KEY,
   ACCEPT_BLUE_API_KEY_SANDBOX,
+  ACCEPT_BLUE_BASE_URL,
   API_KEY,
   SSO_KEY,
-  BASE_URL,
   PORT = 3000
 } = process.env;
 
-// ─── PERSISTENT LOCATION STORE ───────────────────────────────────────────────
-// Persists to disk so tokens survive Render restarts/spin-downs
+// FIX 1: Strip any trailing slash from BASE_URL to prevent redirect_uri mismatch
+const BASE_URL = (process.env.BASE_URL || 'https://patriot-payments-ghl.onrender.com').replace(/\/$/, '');
+
+// ─── PERSISTENT LOCATION STORE ────────────────────────────────────────────────
 const STORE_PATH = path.join('/tmp', 'location_store.json');
 
 function loadStore() {
@@ -48,8 +50,9 @@ let locationStore = loadStore();
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '2.0.0',
-    locations_connected: Object.keys(locationStore).length
+    version: '2.1.0',
+    locations_connected: Object.keys(locationStore).length,
+    base_url: BASE_URL
   });
 });
 
@@ -61,6 +64,12 @@ app.get('/oauth/callback', async (req, res) => {
     return res.status(400).json({ error: 'Missing authorization code' });
   }
 
+  // FIX 2: Log exactly what we're sending so we can debug any mismatch
+  const redirectUri = `${BASE_URL}/oauth/callback`;
+  console.log('OAuth callback received. code:', code ? 'present' : 'missing');
+  console.log('Using redirect_uri:', redirectUri);
+  console.log('Using client_id:', GHL_CLIENT_ID);
+
   try {
     // Step 1: Exchange code for access token
     const params = new URLSearchParams();
@@ -68,7 +77,9 @@ app.get('/oauth/callback', async (req, res) => {
     params.append('client_secret', GHL_CLIENT_SECRET);
     params.append('grant_type', 'authorization_code');
     params.append('code', code);
-    params.append('redirect_uri', `${BASE_URL}/oauth/callback`);
+    params.append('redirect_uri', redirectUri);
+
+    console.log('Sending token exchange to GHL...');
 
     const tokenResponse = await axios.post(
       'https://services.leadconnectorhq.com/oauth/token',
@@ -82,6 +93,7 @@ app.get('/oauth/callback', async (req, res) => {
     );
 
     const { access_token, refresh_token, locationId, companyId } = tokenResponse.data;
+    console.log(`Token exchange successful. locationId: ${locationId}`);
 
     // Step 2: Store tokens
     locationStore[locationId] = {
@@ -93,18 +105,19 @@ app.get('/oauth/callback', async (req, res) => {
     };
     saveStore(locationStore);
 
-    console.log(`OAuth complete for location: ${locationId}`);
-
-    // Step 3: CREATE PROVIDER CONFIG — this is what makes the app appear
-    // under Payments > Integrations in GHL
+    // FIX 3: Create provider config BEFORE sending response
+    // and log the full error if it fails so we can debug
     try {
-      await createProviderConfig(locationId, access_token);
-      console.log(`Provider config created for location: ${locationId}`);
+      const providerResult = await createProviderConfig(locationId, access_token);
+      console.log(`Provider config created successfully for location: ${locationId}`);
+      console.log('Provider result:', JSON.stringify(providerResult));
     } catch (providerErr) {
-      // Log but don't fail the OAuth flow — provider config can be retried
-      console.error('Provider config creation failed:', providerErr?.response?.data || providerErr.message);
+      const errDetail = providerErr?.response?.data || providerErr.message;
+      console.error('Provider config creation FAILED:', JSON.stringify(errDetail));
+      // Continue — user is still connected, they can retry setup
     }
 
+    // Step 3: Return success page
     res.send(`
       <!DOCTYPE html>
       <html>
@@ -132,7 +145,8 @@ app.get('/oauth/callback', async (req, res) => {
     `);
 
   } catch (err) {
-    console.error('OAuth error:', err?.response?.data || err.message);
+    const errData = err?.response?.data || err.message;
+    console.error('OAuth error:', JSON.stringify(errData));
     res.status(500).send(`
       <!DOCTYPE html>
       <html>
@@ -161,26 +175,27 @@ app.get('/oauth/callback', async (req, res) => {
 });
 
 // ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
-// This is the missing piece — registers Patriot Payments under
-// Payments > Integrations in the GHL sub-account
+// FIX 4: Corrected payload structure to match GHL API spec exactly
+// liveMode and testMode keys are what GHL uses to show the app in Payments > Integrations
 async function createProviderConfig(locationId, accessToken) {
   const providerPayload = {
     name: 'Patriot Payments',
     description: 'Accept credit cards, debit cards, and ACH payments powered by Accept Blue. No contracts. Transparent pricing.',
-    imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
-    locationId: locationId,
-    queryUrl: `${BASE_URL}/payments/query`,
     paymentsUrl: `${BASE_URL}/payments/checkout`,
-    setupUrl: `${BASE_URL}/setup`,
-    liveConfig: {
-      apiKey: API_KEY,
-      mode: 'live'
+    queryUrl: `${BASE_URL}/payments/query`,
+    imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
+    // FIX: liveMode and testMode must be flat objects with just apiKey
+    // This is what registers the app under Payments > Integrations
+    liveMode: {
+      apiKey: API_KEY
     },
-    testConfig: {
-      apiKey: API_KEY,
-      mode: 'test'
+    testMode: {
+      apiKey: API_KEY
     }
   };
+
+  console.log('Creating provider config for locationId:', locationId);
+  console.log('Payload:', JSON.stringify(providerPayload));
 
   const response = await axios.post(
     `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
@@ -194,9 +209,9 @@ async function createProviderConfig(locationId, accessToken) {
     }
   );
 
-  // Store provider ID for this location
+  // Store provider ID
   if (locationStore[locationId]) {
-    locationStore[locationId].providerId = response.data?.id;
+    locationStore[locationId].providerId = response.data?.id || response.data?._id;
     saveStore(locationStore);
   }
 
@@ -315,7 +330,6 @@ app.get('/setup', (req, res) => {
 app.post('/setup/save', (req, res) => {
   const { apiKey, sourceKey, mode, ssoToken } = req.body;
 
-  // Decrypt SSO token to get locationId
   let locationId = null;
   try {
     if (ssoToken && SSO_KEY) {
@@ -508,7 +522,9 @@ app.post('/payments/process', async (req, res) => {
     const [expMonth, expYear] = expiry.split('/');
     const locationData = locationStore[locationId] || {};
     const apiKey = locationData.acceptBlueApiKey || ACCEPT_BLUE_API_KEY;
-    const ACCEPT_BLUE_BASE_URL = process.env.ACCEPT_BLUE_BASE_URL || 'https://api.accept.blue/api/v2'; const response = await axios.post(`${ACCEPT_BLUE_BASE_URL}/transactions/charge`, {
+    const baseUrl = ACCEPT_BLUE_BASE_URL || 'https://api.accept.blue/api/v2';
+
+    const response = await axios.post(`${baseUrl}/transactions/charge`, {
       amount: parseFloat(amount),
       card: {
         number: cardNumber,
@@ -523,6 +539,7 @@ app.post('/payments/process', async (req, res) => {
         'Content-Type': 'application/json'
       }
     });
+
     const txn = response.data;
     res.json({ success: true, transactionId: txn.reference_number, status: txn.status });
   } catch (err) {
@@ -533,5 +550,6 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v2.0 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.1 running on port ${PORT}`);
+  console.log(`BASE_URL: ${BASE_URL}`);
 });
