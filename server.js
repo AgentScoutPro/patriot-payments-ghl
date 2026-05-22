@@ -184,21 +184,19 @@ app.get('/oauth/callback', async (req, res) => {
     } else {
       console.log(`Direct location install. locationId: ${locationId}`);
       try {
-        const locationToken = await getLocationToken(companyToken, companyId, locationId);
-        if (locationToken) {
-          locationStore[locationId] = { access_token: locationToken, companyId, locationId, connected_at: new Date().toISOString() };
-          saveStore(locationStore);
-          const providerResult = await createProviderConfig(locationId, locationToken);
-          console.log('Provider config SUCCESS:', JSON.stringify(providerResult));
-          locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
-          saveStore(locationStore);
-        } else {
-          console.log('No location token — trying with company token directly');
-          const providerResult = await createProviderConfig(locationId, companyToken);
-          console.log('Provider config SUCCESS (company token):', JSON.stringify(providerResult));
-          locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
-          saveStore(locationStore);
-        }
+        // Use OAuth token directly — it has all payment scopes
+        // getLocationToken strips scopes and causes 401 on provider config
+        locationStore[locationId] = {
+          access_token: companyToken,
+          companyId,
+          locationId,
+          connected_at: new Date().toISOString()
+        };
+        saveStore(locationStore);
+        const providerResult = await createProviderConfig(locationId, companyToken);
+        console.log('Provider config SUCCESS:', JSON.stringify(providerResult));
+        locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+        saveStore(locationStore);
       } catch (provErr) {
         console.error('Provider config FAILED:', JSON.stringify(provErr?.response?.data || provErr.message));
         console.error('Status:', provErr?.response?.status);
