@@ -75,8 +75,11 @@ async function createProviderConfig(locationId, locationToken) {
   console.log('Payload:', JSON.stringify(connectPayload));
 
   const response = await axios.post(
-    `https://services.leadconnectorhq.com/payments/custom-provider/connect`,
-    connectPayload,
+    `https://services.leadconnectorhq.com/payments/custom-provider/connect?locationId=${locationId}`,
+    {
+      liveConfig: connectPayload.liveConfig,
+      testConfig: connectPayload.testConfig
+    },
     { headers }
   );
 
