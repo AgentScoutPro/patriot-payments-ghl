@@ -20,10 +20,8 @@ const {
 } = process.env;
 
 const BASE_URL = (process.env.BASE_URL || 'https://patriot-payments-ghl.onrender.com').replace(/\/$/, '');
-// App ID from GHL Marketplace (first part of client ID before the dash suffix)
 const APP_ID = GHL_CLIENT_ID ? GHL_CLIENT_ID.split('-').slice(0, -1).join('-') : '';
 
-// ─── PERSISTENT LOCATION STORE ────────────────────────────────────────────────
 const STORE_PATH = path.join('/tmp', 'location_store.json');
 
 function loadStore() {
@@ -40,56 +38,30 @@ function saveStore(store) {
 
 let locationStore = loadStore();
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({
-    status: 'Patriot Payments GHL Integration Server Running',
-    version: '2.6.0',
-    locations_connected: Object.keys(locationStore).length,
-    base_url: BASE_URL
-  });
+  res.json({ status: 'Patriot Payments GHL Integration Server Running', version: '2.7.0', locations_connected: Object.keys(locationStore).length, base_url: BASE_URL });
 });
 
-// ─── GET INSTALLED LOCATIONS ──────────────────────────────────────────────────
 async function getInstalledLocations(companyToken, companyId) {
-  console.log('Fetching installed locations for companyId:', companyId);
-  console.log('Using appId:', APP_ID);
+  console.log('Fetching installed locations for companyId:', companyId, 'appId:', APP_ID);
   const response = await axios.get(
     `https://services.leadconnectorhq.com/oauth/installedLocations?appId=${APP_ID}&companyId=${companyId}&limit=100`,
-    {
-      headers: {
-        'Authorization': `Bearer ${companyToken}`,
-        'Version': '2021-07-28',
-        'Accept': 'application/json'
-      }
-    }
+    { headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28', 'Accept': 'application/json' } }
   );
-  console.log('Installed locations response:', JSON.stringify(response.data));
   return response.data?.locations || response.data?.data || [];
 }
 
-// ─── GET LOCATION TOKEN ───────────────────────────────────────────────────────
 async function getLocationToken(companyToken, companyId, locationId) {
   console.log(`Getting location token for locationId: ${locationId}`);
   const response = await axios.post(
     'https://services.leadconnectorhq.com/oauth/locationToken',
     { companyId, locationId },
-    {
-      headers: {
-        'Authorization': `Bearer ${companyToken}`,
-        'Content-Type': 'application/json',
-        'Version': '2021-07-28',
-        'Accept': 'application/json'
-      }
-    }
+    { headers: { 'Authorization': `Bearer ${companyToken}`, 'Content-Type': 'application/json', 'Version': '2021-07-28', 'Accept': 'application/json' } }
   );
-  console.log('Location token response keys:', Object.keys(response.data));
   return response.data?.access_token || response.data?.token;
 }
 
-// ─── UPSERT PROVIDER CONFIG ───────────────────────────────────────────────────
-// GHL returns 403 if provider config already exists — so we check first,
-// then update (PUT) if it exists, or create (POST) if it doesn't
+// FIX 1: Use liveConfig/testConfig with queryUrl+paymentsUrl inside each block
 async function createProviderConfig(locationId, locationToken) {
   const providerPayload = {
     name: 'Patriot Payments',
@@ -97,68 +69,64 @@ async function createProviderConfig(locationId, locationToken) {
     paymentsUrl: `${BASE_URL}/payments/checkout`,
     queryUrl: `${BASE_URL}/payments/query`,
     imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
-    liveMode: { apiKey: process.env.ACCEPT_BLUE_API_KEY },
-    testMode: { apiKey: process.env.ACCEPT_BLUE_API_KEY_SANDBOX }
+    liveConfig: {
+      apiKey: API_KEY,
+      queryUrl: `${BASE_URL}/payments/query`,
+      paymentsUrl: `${BASE_URL}/payments/checkout`
+    },
+    testConfig: {
+      apiKey: API_KEY,
+      queryUrl: `${BASE_URL}/payments/query`,
+      paymentsUrl: `${BASE_URL}/payments/checkout`
+    }
   };
 
-  const headers = {
-    'Authorization': `Bearer ${locationToken}`,
-    'Content-Type': 'application/json',
-    'Version': '2021-07-28'
-  };
+  const headers = { 'Authorization': `Bearer ${locationToken}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' };
 
-  // Step 1: Check if provider config already exists
   console.log('Checking for existing provider config for locationId:', locationId);
   try {
-    const existing = await axios.get(
-      `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
-      { headers }
-    );
-    console.log('Existing provider response:', JSON.stringify(existing.data));
-
+    const existing = await axios.get(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, { headers });
     const existingProvider = existing.data?.provider || existing.data;
     const providerId = existingProvider?._id || existingProvider?.id;
-
     if (providerId) {
-      // Provider exists — update it with PUT
-      console.log(`Provider already exists (id: ${providerId}) — updating with PUT`);
-      const updateResponse = await axios.put(
-        `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
-        providerPayload,
-        { headers }
-      );
+      console.log(`Provider exists (id: ${providerId}) — updating with PUT`);
+      const updateResponse = await axios.put(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, providerPayload, { headers });
       console.log('Provider UPDATE success:', JSON.stringify(updateResponse.data));
       return updateResponse.data;
     }
   } catch (checkErr) {
-    const status = checkErr?.response?.status;
-    console.log(`GET provider check status: ${status} — proceeding to create`);
+    console.log(`GET provider check status: ${checkErr?.response?.status} — proceeding to create`);
   }
 
-  // Step 2: Create new provider config
   console.log('Creating NEW provider config for locationId:', locationId);
-  const response = await axios.post(
-    `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
-    providerPayload,
-    { headers }
-  );
+  const response = await axios.post(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, providerPayload, { headers });
   console.log('Provider CREATE success:', JSON.stringify(response.data));
   return response.data;
 }
 
-// ─── OAUTH CALLBACK ───────────────────────────────────────────────────────────
+// FIX 2: findCompanyToken checks multiple storage patterns so webhook never fails
+function findCompanyToken(companyId) {
+  if (locationStore[`company_${companyId}`]?.access_token) return locationStore[`company_${companyId}`].access_token;
+  for (const key of Object.keys(locationStore)) {
+    if (locationStore[key]?.companyId === companyId && locationStore[key]?.access_token) {
+      console.log(`Found company token via location entry: ${key}`);
+      return locationStore[key].access_token;
+    }
+  }
+  console.error(`No company token found for companyId: ${companyId}`);
+  console.log('Available store keys:', Object.keys(locationStore));
+  return null;
+}
+
 app.get('/oauth/callback', async (req, res) => {
   const { code } = req.query;
-
   if (!code) return res.status(400).json({ error: 'Missing authorization code' });
 
   const redirectUri = `${BASE_URL}/oauth/callback`;
   console.log('=== OAuth callback received ===');
-  console.log('redirect_uri:', redirectUri);
-  console.log('client_id:', GHL_CLIENT_ID);
+  console.log('redirect_uri:', redirectUri, 'client_id:', GHL_CLIENT_ID);
 
   try {
-    // Step 1: Exchange code for Company-level access token
     const params = new URLSearchParams();
     params.append('client_id', GHL_CLIENT_ID);
     params.append('client_secret', GHL_CLIENT_SECRET);
@@ -179,188 +147,98 @@ app.get('/oauth/callback', async (req, res) => {
     const companyId = tokenResponse.data.companyId;
     const isBulk = tokenResponse.data.isBulkInstallation;
     const userType = tokenResponse.data.userType;
+    const locationId = tokenResponse.data.locationId;
 
     console.log(`userType: ${userType}, isBulkInstallation: ${isBulk}, companyId: ${companyId}`);
 
-    // Store company token
-    locationStore[`company_${companyId}`] = {
-      access_token: companyToken,
-      refresh_token: tokenResponse.data.refresh_token,
-      companyId,
-      connected_at: new Date().toISOString()
-    };
+    // FIX 3: Store under BOTH keys so webhook fallback always finds it
+    const companyEntry = { access_token: companyToken, refresh_token: tokenResponse.data.refresh_token, companyId, connected_at: new Date().toISOString() };
+    locationStore[`company_${companyId}`] = companyEntry;
+    if (locationId) locationStore[locationId] = { ...companyEntry, locationId };
     saveStore(locationStore);
+    console.log(`Company token stored for companyId: ${companyId}`);
 
-    // Step 2: Handle bulk/company install — get location tokens and create provider configs
     if (isBulk || userType === 'Company') {
-      console.log('Bulk/Company install detected — fetching installed locations...');
-
+      console.log('Bulk/Company install — fetching installed locations...');
       try {
         const locations = await getInstalledLocations(companyToken, companyId);
         console.log(`Found ${locations.length} installed locations`);
-
-        if (locations.length === 0) {
-          console.log('No locations found yet — will rely on webhook for individual installs');
-        }
-
         for (const loc of locations) {
-          const locationId = loc.locationId || loc._id || loc.id;
-          console.log(`Processing location: ${locationId}`);
-
+          const locId = loc.locationId || loc._id || loc.id;
           try {
-            const locationToken = await getLocationToken(companyToken, companyId, locationId);
-
-            if (!locationToken) {
-              console.error(`No location token returned for ${locationId}`);
-              continue;
-            }
-
-            // Store location data
-            locationStore[locationId] = {
-              access_token: locationToken,
-              companyId,
-              locationId,
-              connected_at: new Date().toISOString()
-            };
+            const locationToken = await getLocationToken(companyToken, companyId, locId);
+            if (!locationToken) { console.error(`No token for ${locId}`); continue; }
+            locationStore[locId] = { access_token: locationToken, companyId, locationId: locId, connected_at: new Date().toISOString() };
             saveStore(locationStore);
-
-            // Create provider config with location token
-            const providerResult = await createProviderConfig(locationId, locationToken);
-            console.log(`Provider config SUCCESS for ${locationId}:`, JSON.stringify(providerResult));
-
-            locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+            const providerResult = await createProviderConfig(locId, locationToken);
+            locationStore[locId].providerId = providerResult?.id || providerResult?._id;
             saveStore(locationStore);
-
+            console.log(`Provider config SUCCESS for ${locId}`);
           } catch (locErr) {
-            console.error(`Failed for location ${locationId}:`, JSON.stringify(locErr?.response?.data || locErr.message));
+            console.error(`Failed for location ${locId}:`, JSON.stringify(locErr?.response?.data || locErr.message));
           }
         }
-      } catch (locFetchErr) {
-        console.error('Failed to fetch locations:', JSON.stringify(locFetchErr?.response?.data || locFetchErr.message));
+      } catch (fetchErr) {
+        console.error('Failed to fetch locations:', JSON.stringify(fetchErr?.response?.data || fetchErr.message));
       }
-
     } else {
-      // Direct location-level install
-      const locationId = tokenResponse.data.locationId;
       console.log(`Direct location install. locationId: ${locationId}`);
-
-      locationStore[locationId] = {
-        access_token: companyToken,
-        companyId,
-        locationId,
-        connected_at: new Date().toISOString()
-      };
-      saveStore(locationStore);
-
       try {
-        const providerResult = await createProviderConfig(locationId, companyToken);
-        console.log('Provider config SUCCESS:', JSON.stringify(providerResult));
-        locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
-        saveStore(locationStore);
+        const locationToken = await getLocationToken(companyToken, companyId, locationId);
+        if (locationToken) {
+          locationStore[locationId] = { access_token: locationToken, companyId, locationId, connected_at: new Date().toISOString() };
+          saveStore(locationStore);
+          const providerResult = await createProviderConfig(locationId, locationToken);
+          console.log('Provider config SUCCESS:', JSON.stringify(providerResult));
+          locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+          saveStore(locationStore);
+        } else {
+          console.log('No location token — trying with company token directly');
+          const providerResult = await createProviderConfig(locationId, companyToken);
+          console.log('Provider config SUCCESS (company token):', JSON.stringify(providerResult));
+          locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+          saveStore(locationStore);
+        }
       } catch (provErr) {
         console.error('Provider config FAILED:', JSON.stringify(provErr?.response?.data || provErr.message));
+        console.error('Status:', provErr?.response?.status);
       }
     }
 
-    res.send(`
-      <!DOCTYPE html><html><head><title>Patriot Payments Connected</title>
-      <style>* { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
-      body { background: #f5f7fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-      .card { background: white; border-radius: 12px; padding: 48px 40px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); max-width: 420px; width: 90%; }
-      .check { font-size: 64px; margin-bottom: 16px; }
-      h1 { color: #1B3A6B; font-size: 24px; margin-bottom: 12px; }
-      p { color: #555; font-size: 15px; line-height: 1.6; }
-      .btn { display: inline-block; margin-top: 24px; padding: 12px 28px; background: #1B3A6B; color: white; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; }</style>
-      </head><body><div class="card">
-      <div class="check">✅</div>
-      <h1>Patriot Payments Connected!</h1>
-      <p>Your GoHighLevel account has been successfully connected to Patriot Payments. You can now process payments through your account.</p>
-      <a class="btn" href="https://app.gohighlevel.com">Return to GoHighLevel</a>
-      </div></body></html>
-    `);
+    res.send(`<!DOCTYPE html><html><head><title>Patriot Payments Connected</title>
+      <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;}.card{background:white;border-radius:12px;padding:48px 40px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:420px;width:90%;}.check{font-size:64px;margin-bottom:16px;}h1{color:#1B3A6B;font-size:24px;margin-bottom:12px;}p{color:#555;font-size:15px;line-height:1.6;}.btn{display:inline-block;margin-top:24px;padding:12px 28px;background:#1B3A6B;color:white;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;}</style>
+      </head><body><div class="card"><div class="check">✅</div><h1>Patriot Payments Connected!</h1><p>Your GoHighLevel account has been successfully connected to Patriot Payments. You can now process payments through your account.</p><a class="btn" href="https://app.gohighlevel.com">Return to GoHighLevel</a></div></body></html>`);
 
   } catch (err) {
-    const errData = err?.response?.data || err.message;
-    console.error('=== OAuth FAILED ===');
-    console.error(JSON.stringify(errData));
-    res.status(500).send(`
-      <!DOCTYPE html><html><head><title>Connection Error</title>
-      <style>* { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
-      body { background: #f5f7fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-      .card { background: white; border-radius: 12px; padding: 48px 40px; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); max-width: 420px; width: 90%; }
-      h1 { color: #C0392B; font-size: 24px; margin-bottom: 12px; }
-      p { color: #555; font-size: 14px; }
-      .err { background: #fff5f5; border-radius: 8px; padding: 12px; margin-top: 16px; font-size: 12px; color: #C0392B; font-family: monospace; }</style>
-      </head><body><div class="card">
-      <h1>Connection Error</h1>
-      <p>There was an issue connecting your account. Please try again or contact support.</p>
-      <div class="err">${err?.response?.data?.message || err.message}</div>
-      <p style="margin-top:16px;font-size:13px;">Support: patriotspayments.com | (941) 367-5076</p>
-      </div></body></html>
-    `);
+    console.error('=== OAuth FAILED ===', JSON.stringify(err?.response?.data || err.message));
+    res.status(500).send(`<!DOCTYPE html><html><head><title>Connection Error</title>
+      <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;}.card{background:white;border-radius:12px;padding:48px 40px;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.08);max-width:420px;width:90%;}h1{color:#C0392B;font-size:24px;margin-bottom:12px;}p{color:#555;font-size:14px;}.err{background:#fff5f5;border-radius:8px;padding:12px;margin-top:16px;font-size:12px;color:#C0392B;font-family:monospace;}</style>
+      </head><body><div class="card"><h1>Connection Error</h1><p>There was an issue connecting your account. Please try again or contact support.</p><div class="err">${err?.response?.data?.message || err.message}</div><p style="margin-top:16px;font-size:13px;">Support: patriotspayments.com | (941) 367-5076</p></div></body></html>`);
   }
 });
 
-// ─── INSTALL WEBHOOK — PRIMARY path for location-level provider config ────────
-// GHL sends this webhook for every location install — this is the most reliable
-// way to get a location token because it fires AFTER the install completes
 app.post('/webhooks/install', async (req, res) => {
-  // Respond immediately so GHL doesn't timeout
   res.status(200).json({ success: true });
+  const { locationId, companyId } = req.body;
+  console.log('=== INSTALL WEBHOOK ===', JSON.stringify(req.body, null, 2));
+  if (!locationId || !companyId) { console.log('Missing locationId or companyId'); return; }
 
-  const body = req.body;
-  console.log('=== INSTALL WEBHOOK ===');
-  console.log(JSON.stringify(body, null, 2));
+  const companyToken = findCompanyToken(companyId);
+  if (!companyToken) { console.error(`No company token for ${companyId}`); return; }
 
-  const locationId = body.locationId;
-  const companyId = body.companyId;
-
-  if (!locationId || !companyId) {
-    console.log('Webhook missing locationId or companyId — skipping');
-    return;
-  }
-
-  console.log(`Processing install webhook: locationId=${locationId}, companyId=${companyId}`);
-
-  // Get stored company token
-  const companyData = locationStore[`company_${companyId}`];
-  if (!companyData?.access_token) {
-    console.error(`No company token found for companyId: ${companyId}`);
-    console.log('Available keys:', Object.keys(locationStore));
-    return;
-  }
-
-  // Small delay to ensure GHL has completed install on their end
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   try {
-    console.log(`Getting location token for ${locationId}...`);
-    const locationToken = await getLocationToken(companyData.access_token, companyId, locationId);
-
-    if (!locationToken) {
-      console.error(`No location token returned for ${locationId}`);
-      return;
-    }
-
-    console.log(`Got location token for ${locationId} ✅`);
-
-    locationStore[locationId] = {
-      access_token: locationToken,
-      companyId,
-      locationId,
-      installed_at: new Date().toISOString()
-    };
+    const locationToken = await getLocationToken(companyToken, companyId, locationId);
+    if (!locationToken) { console.error(`No location token for ${locationId}`); return; }
+    locationStore[locationId] = { access_token: locationToken, companyId, locationId, installed_at: new Date().toISOString() };
     saveStore(locationStore);
-
-    // Create or update provider config
     const providerResult = await createProviderConfig(locationId, locationToken);
     locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
     saveStore(locationStore);
-    console.log(`✅ Provider config complete for ${locationId}:`, JSON.stringify(providerResult));
-
+    console.log(`✅ Provider config complete for ${locationId}`);
   } catch (e) {
-    console.error(`Webhook install FAILED for ${locationId}:`, JSON.stringify(e?.response?.data || e.message));
-    console.error('Status:', e?.response?.status);
+    console.error(`Webhook install FAILED for ${locationId}:`, JSON.stringify(e?.response?.data || e.message), 'Status:', e?.response?.status);
   }
 });
 
@@ -374,24 +252,14 @@ app.post('/webhooks/uninstall', (req, res) => {
 app.post('/webhooks', async (req, res) => {
   const body = req.body;
   console.log('=== Generic Webhook ===', JSON.stringify(body));
-
-  // Route install events to install handler logic
   if (body.type === 'INSTALL' && body.locationId) {
     res.status(200).json({ success: true });
-
-    const locationId = body.locationId;
-    const companyId = body.companyId;
-    const companyData = locationStore[`company_${companyId}`];
-
-    if (!companyData?.access_token) {
-      console.error(`No company token for companyId: ${companyId}`);
-      return;
-    }
-
+    const { locationId, companyId } = body;
+    const companyToken = findCompanyToken(companyId);
+    if (!companyToken) { console.error(`No company token for ${companyId}`); return; }
     await new Promise(resolve => setTimeout(resolve, 2000));
-
     try {
-      const locationToken = await getLocationToken(companyData.access_token, companyId, locationId);
+      const locationToken = await getLocationToken(companyToken, companyId, locationId);
       if (locationToken) {
         locationStore[locationId] = { access_token: locationToken, companyId, locationId, installed_at: new Date().toISOString() };
         saveStore(locationStore);
@@ -400,73 +268,36 @@ app.post('/webhooks', async (req, res) => {
         saveStore(locationStore);
         console.log(`✅ Provider config via generic webhook for ${locationId}`);
       }
-    } catch (e) {
-      console.error(`Generic webhook install failed:`, JSON.stringify(e?.response?.data || e.message));
-    }
+    } catch (e) { console.error('Generic webhook install failed:', JSON.stringify(e?.response?.data || e.message)); }
     return;
   }
-
   res.status(200).json({ success: true });
 });
 
-// ─── SETUP PAGE ───────────────────────────────────────────────────────────────
 app.get('/setup', (req, res) => {
   const { sso_token } = req.query;
   res.send(`<!DOCTYPE html><html><head><title>Patriot Payments Setup</title>
-    <style>* { box-sizing: border-box; margin: 0; padding: 0; font-family: Arial, sans-serif; }
-    body { background: #f5f7fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-    .card { background: white; border-radius: 12px; padding: 40px; max-width: 480px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
-    .logo { text-align: center; margin-bottom: 24px; }
-    .logo h1 { color: #1B3A6B; font-size: 22px; font-weight: 700; }
-    .logo p { color: #666; font-size: 14px; margin-top: 4px; }
-    label { display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; margin-top: 16px; }
-    input { width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
-    .btn { display: block; width: 100%; padding: 14px; background: #1B3A6B; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 24px; }
-    .mode-toggle { display: flex; gap: 12px; margin-top: 16px; }
-    .mode-btn { flex: 1; padding: 10px; border: 2px solid #ddd; border-radius: 8px; background: white; cursor: pointer; font-size: 13px; font-weight: 600; color: #666; }
-    .mode-btn.active { border-color: #1B3A6B; color: #1B3A6B; background: #f0f4ff; }
-    .success { display: none; text-align: center; color: #27ae60; font-weight: 600; margin-top: 16px; }</style>
+    <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}.card{background:white;border-radius:12px;padding:40px;max-width:480px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08);}.logo{text-align:center;margin-bottom:24px;}.logo h1{color:#1B3A6B;font-size:22px;font-weight:700;}.logo p{color:#666;font-size:14px;margin-top:4px;}label{display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px;margin-top:16px;}input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;}.btn{display:block;width:100%;padding:14px;background:#1B3A6B;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;margin-top:24px;}.mode-toggle{display:flex;gap:12px;margin-top:16px;}.mode-btn{flex:1;padding:10px;border:2px solid #ddd;border-radius:8px;background:white;cursor:pointer;font-size:13px;font-weight:600;color:#666;}.mode-btn.active{border-color:#1B3A6B;color:#1B3A6B;background:#f0f4ff;}.success{display:none;text-align:center;color:#27ae60;font-weight:600;margin-top:16px;}</style>
     </head><body><div class="card">
     <div class="logo"><h1>🇺🇸 Patriot Payments</h1><p>Connect your merchant account to GoHighLevel</p></div>
-    <div class="mode-toggle">
-      <button class="mode-btn active" onclick="setMode('test',this)">🧪 Test Mode</button>
-      <button class="mode-btn" onclick="setMode('live',this)">🚀 Live Mode</button>
-    </div>
-    <input type="hidden" id="mode" value="test" />
-    <label>Accept Blue API Key</label>
-    <input type="password" id="apiKey" placeholder="Enter your Accept Blue API key" />
-    <label>Accept Blue Source Key / PIN</label>
-    <input type="password" id="sourceKey" placeholder="Enter your source key or PIN" />
+    <div class="mode-toggle"><button class="mode-btn active" onclick="setMode('test',this)">🧪 Test Mode</button><button class="mode-btn" onclick="setMode('live',this)">🚀 Live Mode</button></div>
+    <input type="hidden" id="mode" value="test"/>
+    <label>Accept Blue API Key</label><input type="password" id="apiKey" placeholder="Enter your Accept Blue API key"/>
+    <label>Accept Blue Source Key / PIN</label><input type="password" id="sourceKey" placeholder="Enter your source key or PIN"/>
     <button class="btn" onclick="saveCredentials()">Connect Patriot Payments</button>
     <div class="success" id="successMsg">✅ Successfully connected! You can close this window.</div>
     </div>
     <script>
     function setMode(mode,btn){document.getElementById('mode').value=mode;document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');}
-    async function saveCredentials(){
-      const apiKey=document.getElementById('apiKey').value;
-      const sourceKey=document.getElementById('sourceKey').value;
-      const mode=document.getElementById('mode').value;
-      if(!apiKey||!sourceKey){alert('Please enter both keys');return;}
-      const res=await fetch('/setup/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey,sourceKey,mode,ssoToken:'${sso_token}'})});
-      if(res.ok){document.getElementById('successMsg').style.display='block';}
-      else{alert('Error saving. Please try again.');}
-    }
+    async function saveCredentials(){const apiKey=document.getElementById('apiKey').value;const sourceKey=document.getElementById('sourceKey').value;const mode=document.getElementById('mode').value;if(!apiKey||!sourceKey){alert('Please enter both keys');return;}const res=await fetch('/setup/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey,sourceKey,mode,ssoToken:'${sso_token}'})});if(res.ok){document.getElementById('successMsg').style.display='block';}else{alert('Error saving. Please try again.');}}
     </script></body></html>`);
 });
 
 app.post('/setup/save', (req, res) => {
   const { apiKey, sourceKey, mode, ssoToken } = req.body;
   let locationId = null;
-  try {
-    if (ssoToken && SSO_KEY) { const d = decryptSSOToken(ssoToken); locationId = d?.activeLocation; }
-  } catch (e) { console.error('SSO error:', e.message); }
-  if (locationId && locationStore[locationId]) {
-    locationStore[locationId].acceptBlueApiKey = apiKey;
-    locationStore[locationId].acceptBlueSourceKey = sourceKey;
-    locationStore[locationId].mode = mode;
-    saveStore(locationStore);
-    console.log(`Credentials saved for ${locationId}`);
-  }
+  try { if (ssoToken && SSO_KEY) { const d = decryptSSOToken(ssoToken); locationId = d?.activeLocation; } } catch (e) { console.error('SSO error:', e.message); }
+  if (locationId && locationStore[locationId]) { locationStore[locationId].acceptBlueApiKey = apiKey; locationStore[locationId].acceptBlueSourceKey = sourceKey; locationStore[locationId].mode = mode; saveStore(locationStore); console.log(`Credentials saved for ${locationId}`); }
   res.json({ success: true });
 });
 
@@ -475,29 +306,18 @@ function decryptSSOToken(token) {
     const key = crypto.createHash('sha256').update(SSO_KEY).digest();
     const buf = Buffer.from(token, 'base64');
     const decipher = crypto.createDecipheriv('aes-256-cbc', key, buf.slice(0, 16));
-    let d = decipher.update(buf.slice(16), undefined, 'utf8');
-    d += decipher.final('utf8');
+    let d = decipher.update(buf.slice(16), undefined, 'utf8'); d += decipher.final('utf8');
     return JSON.parse(d);
   } catch (e) { console.error('SSO decrypt failed:', e.message); return null; }
 }
 
 app.get('/getting-started', (req, res) => {
-  res.send(`<!DOCTYPE html><html><head><title>Getting Started</title>
-    <style>body{font-family:Arial,sans-serif;background:#f5f7fa;padding:24px;}
-    .header{background:#1B3A6B;border-radius:12px;padding:28px;text-align:center;margin-bottom:24px;}
-    .header h1{color:white;font-size:22px;}.header p{color:#AACCE8;font-size:14px;}
-    .step{display:flex;gap:16px;background:white;border-radius:10px;padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);}
-    .num{background:#1B3A6B;color:white;font-size:20px;font-weight:700;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-    h3{color:#1B3A6B;font-size:16px;margin-bottom:6px;}p{color:#555;font-size:14px;line-height:1.6;}
-    .contact{background:#1B3A6B;border-radius:12px;padding:24px;text-align:center;}
-    .contact h3{color:white;}.contact p{color:#AACCE8;font-size:14px;margin-bottom:6px;}</style></head>
-    <body>
-    <div class="header"><h1>🇺🇸 Patriot Payments × GoHighLevel</h1><p>3 simple steps to start accepting payments</p></div>
+  res.send(`<!DOCTYPE html><html><head><title>Getting Started</title><style>body{font-family:Arial,sans-serif;background:#f5f7fa;padding:24px;}.header{background:#1B3A6B;border-radius:12px;padding:28px;text-align:center;margin-bottom:24px;}.header h1{color:white;font-size:22px;}.header p{color:#AACCE8;font-size:14px;}.step{display:flex;gap:16px;background:white;border-radius:10px;padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);}.num{background:#1B3A6B;color:white;font-size:20px;font-weight:700;width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;}h3{color:#1B3A6B;font-size:16px;margin-bottom:6px;}p{color:#555;font-size:14px;line-height:1.6;}.contact{background:#1B3A6B;border-radius:12px;padding:24px;text-align:center;}.contact h3{color:white;}.contact p{color:#AACCE8;font-size:14px;margin-bottom:6px;}</style></head>
+    <body><div class="header"><h1>🇺🇸 Patriot Payments × GoHighLevel</h1><p>3 simple steps to start accepting payments</p></div>
     <div class="step"><div class="num">1</div><div><h3>Install the App</h3><p>Find Patriot Payments in the GHL Marketplace and click Install.</p></div></div>
     <div class="step"><div class="num">2</div><div><h3>Connect Credentials</h3><p>Enter your Accept Blue API Key and Source Key.</p></div></div>
-    <div class="step"><div class="num">3</div><div><h3>Start Processing</h3><p>Patriot Payments appears under Payments > Integrations.</p></div></div>
-    <br/><div class="contact"><h3>Need Help?</h3><p>📞 (941) 367-5076</p><p>🌐 patriotspayments.com</p></div>
-    </body></html>`);
+    <div class="step"><div class="num">3</div><div><h3>Start Processing</h3><p>Patriot Payments appears under Payments > Integrations in your GHL account.</p></div></div>
+    <br/><div class="contact"><h3>Need Help?</h3><p>📞 (941) 367-5076</p><p>🌐 patriotspayments.com</p></div></body></html>`);
 });
 
 app.post('/payments/query', (req, res) => {
@@ -513,35 +333,14 @@ app.post('/payments/query', (req, res) => {
 
 app.get('/payments/checkout', (req, res) => {
   const { amount, locationId, invoiceId } = req.query;
-  res.send(`<!DOCTYPE html><html><head><title>Checkout</title>
-    <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}
-    body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}
-    .card{background:white;border-radius:12px;padding:40px;max-width:420px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08);}
-    h2{color:#1B3A6B;font-size:20px;margin-bottom:8px;}.amount{font-size:32px;font-weight:700;color:#1B3A6B;margin-bottom:24px;}
-    label{display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px;margin-top:16px;}
-    input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;}
-    .row{display:flex;gap:12px;}.row>div{flex:1;}
-    .btn{display:block;width:100%;padding:14px;background:#C0392B;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;margin-top:24px;}
-    .secure{text-align:center;font-size:12px;color:#888;margin-top:12px;}</style></head>
-    <body><div class="card">
-    <h2>🇺🇸 Patriot Payments</h2>
-    <div class="amount">$${parseFloat(amount||0).toFixed(2)}</div>
+  res.send(`<!DOCTYPE html><html><head><title>Checkout</title><style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}.card{background:white;border-radius:12px;padding:40px;max-width:420px;width:100%;box-shadow:0 4px 24px rgba(0,0,0,.08);}h2{color:#1B3A6B;font-size:20px;margin-bottom:8px;}.amount{font-size:32px;font-weight:700;color:#1B3A6B;margin-bottom:24px;}label{display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px;margin-top:16px;}input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;}.row{display:flex;gap:12px;}.row>div{flex:1;}.btn{display:block;width:100%;padding:14px;background:#C0392B;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;margin-top:24px;}.secure{text-align:center;font-size:12px;color:#888;margin-top:12px;}</style></head>
+    <body><div class="card"><h2>🇺🇸 Patriot Payments</h2><div class="amount">$${parseFloat(amount||0).toFixed(2)}</div>
     <label>Card Number</label><input type="text" id="cn" placeholder="1234 5678 9012 3456" maxlength="19"/>
-    <div class="row"><div><label>Expiry</label><input type="text" id="exp" placeholder="MM/YY" maxlength="5"/></div>
-    <div><label>CVV</label><input type="text" id="cvv" placeholder="123" maxlength="4"/></div></div>
+    <div class="row"><div><label>Expiry</label><input type="text" id="exp" placeholder="MM/YY" maxlength="5"/></div><div><label>CVV</label><input type="text" id="cvv" placeholder="123" maxlength="4"/></div></div>
     <label>Name on Card</label><input type="text" id="name" placeholder="Full name"/>
     <button class="btn" onclick="pay()">Pay $${parseFloat(amount||0).toFixed(2)}</button>
     <p class="secure">🔒 Secured by Patriot Payments & Accept Blue</p></div>
-    <script>
-    async function pay(){
-      const r=await fetch('/payments/process',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cardNumber:document.getElementById('cn').value.replace(/\s/g,''),
-      expiry:document.getElementById('exp').value,cvv:document.getElementById('cvv').value,
-      name:document.getElementById('name').value,amount:'${amount}',locationId:'${locationId}',invoiceId:'${invoiceId}'})});
-      const d=await r.json();
-      if(d.success){window.parent.postMessage({type:'payment_success',transactionId:d.transactionId},'*');}
-      else{alert('Payment failed: '+d.error);}
-    }</script></body></html>`);
+    <script>async function pay(){const r=await fetch('/payments/process',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cardNumber:document.getElementById('cn').value.replace(/\s/g,''),expiry:document.getElementById('exp').value,cvv:document.getElementById('cvv').value,name:document.getElementById('name').value,amount:'${amount}',locationId:'${locationId}',invoiceId:'${invoiceId}'})});const d=await r.json();if(d.success){window.parent.postMessage({type:'payment_success',transactionId:d.transactionId},'*');}else{alert('Payment failed: '+d.error);}}</script></body></html>`);
 });
 
 app.post('/payments/process', async (req, res) => {
@@ -563,7 +362,7 @@ app.post('/payments/process', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v2.6 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v2.7 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
 });
