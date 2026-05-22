@@ -65,7 +65,8 @@ async function createProviderConfig(locationId, locationToken) {
     name: 'Patriot Payments',
     description: 'Transparent, no contract payment processing built for small businesses powered by Accept Blue.',
     imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
-    locationId: locationId,
+    altId: locationId,
+    altType: 'location',
     queryUrl: `${BASE_URL}/payments/query`,
     paymentsUrl: `${BASE_URL}/payments/checkout`
   };
