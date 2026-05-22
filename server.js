@@ -42,31 +42,39 @@ app.get('/', (req, res) => {
   res.json({ status: 'Patriot Payments GHL Integration Server Running', version: '2.7.0', locations_connected: Object.keys(locationStore).length, base_url: BASE_URL });
 });
 
-async function getInstalledLocations(companyToken, companyId) {
-  console.log('Fetching installed locations for companyId:', companyId, 'appId:', APP_ID);
-  const response = await axios.get(
-    `https://services.leadconnectorhq.com/oauth/installedLocations?appId=${APP_ID}&companyId=${companyId}&limit=100`,
-    { headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28', 'Accept': 'application/json' } }
-  );
-  return response.data?.locations || response.data?.data || [];
-}
-
-async function getLocationToken(companyToken, companyId, locationId) {
-  console.log(`Getting location token for locationId: ${locationId}`);
-  const response = await axios.post(
-    'https://services.leadconnectorhq.com/oauth/locationToken',
-    { companyId, locationId },
-    { headers: { 'Authorization': `Bearer ${companyToken}`, 'Content-Type': 'application/json', 'Version': '2021-07-28', 'Accept': 'application/json' } }
-  );
-  return response.data?.access_token || response.data?.token;
-}
-
 async function createProviderConfig(locationId, locationToken) {
   const headers = {
     'Authorization': `Bearer ${locationToken}`,
     'Content-Type': 'application/json',
     'Version': '2021-07-28'
   };
+
+  const connectPayload = {
+    locationId: locationId,
+    liveConfig: {
+      apiKey: API_KEY,
+      queryUrl: `${BASE_URL}/payments/query`,
+      paymentsUrl: `${BASE_URL}/payments/checkout`
+    },
+    testConfig: {
+      apiKey: API_KEY,
+      queryUrl: `${BASE_URL}/payments/query`,
+      paymentsUrl: `${BASE_URL}/payments/checkout`
+    }
+  };
+
+  console.log('Connecting provider config for locationId:', locationId);
+  console.log('Payload:', JSON.stringify(connectPayload));
+
+  const response = await axios.post(
+    `https://services.leadconnectorhq.com/payments/custom-provider/connect`,
+    connectPayload,
+    { headers }
+  );
+
+  console.log('Provider CONNECT success:', JSON.stringify(response.data));
+  return response.data;
+}
 
   // Step 1: Create the app-location association first
   console.log('Step 1: Creating app-location integration for:', locationId);
