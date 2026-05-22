@@ -61,8 +61,28 @@ async function getLocationToken(companyToken, companyId, locationId) {
   return response.data?.access_token || response.data?.token;
 }
 
-// FIX 1: Use liveConfig/testConfig with queryUrl+paymentsUrl inside each block
 async function createProviderConfig(locationId, locationToken) {
+  const headers = {
+    'Authorization': `Bearer ${locationToken}`,
+    'Content-Type': 'application/json',
+    'Version': '2021-07-28'
+  };
+
+  // Step 1: Create the app-location association first
+  console.log('Step 1: Creating app-location integration for:', locationId);
+  try {
+    await axios.post(
+      `https://services.leadconnectorhq.com/payments/custom-provider/connect`,
+      { locationId },
+      { headers }
+    );
+    console.log('Integration connect SUCCESS');
+  } catch (connectErr) {
+    console.log('Integration connect status:', connectErr?.response?.status, JSON.stringify(connectErr?.response?.data));
+    // Continue even if this fails — may already exist
+  }
+
+  // Step 2: Create or update provider config
   const providerPayload = {
     name: 'Patriot Payments',
     description: 'Accept credit cards, debit cards, and ACH payments powered by Accept Blue. No contracts. Transparent pricing.',
@@ -81,16 +101,21 @@ async function createProviderConfig(locationId, locationToken) {
     }
   };
 
-  const headers = { 'Authorization': `Bearer ${locationToken}`, 'Content-Type': 'application/json', 'Version': '2021-07-28' };
-
-  console.log('Checking for existing provider config for locationId:', locationId);
+  console.log('Step 2: Checking for existing provider config for locationId:', locationId);
   try {
-    const existing = await axios.get(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, { headers });
+    const existing = await axios.get(
+      `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+      { headers }
+    );
     const existingProvider = existing.data?.provider || existing.data;
     const providerId = existingProvider?._id || existingProvider?.id;
     if (providerId) {
       console.log(`Provider exists (id: ${providerId}) — updating with PUT`);
-      const updateResponse = await axios.put(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, providerPayload, { headers });
+      const updateResponse = await axios.put(
+        `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+        providerPayload,
+        { headers }
+      );
       console.log('Provider UPDATE success:', JSON.stringify(updateResponse.data));
       return updateResponse.data;
     }
@@ -99,7 +124,11 @@ async function createProviderConfig(locationId, locationToken) {
   }
 
   console.log('Creating NEW provider config for locationId:', locationId);
-  const response = await axios.post(`https://services.leadconnectorhq.com/payments/custom-provider/provider`, providerPayload, { headers });
+  const response = await axios.post(
+    `https://services.leadconnectorhq.com/payments/custom-provider/provider`,
+    providerPayload,
+    { headers }
+  );
   console.log('Provider CREATE success:', JSON.stringify(response.data));
   return response.data;
 }
