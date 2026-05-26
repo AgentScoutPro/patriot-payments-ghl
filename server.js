@@ -220,11 +220,51 @@ app.get('/oauth/callback', async (req, res) => {
     saveStore(locationStore);
     console.log(`Company token stored for companyId: ${companyId}`);
 
-    // FIX #2: Handle ALL install types — both direct location and bulk/company
     if (isBulk || userType === 'Company') {
-      // Agency/Company install — GHL will fire install webhooks per-location
-      // We have the company token stored; webhooks will trigger createProviderConfig per location
-      console.log('Bulk/Company install — company token stored, awaiting per-location install webhooks');
+      // Bulk/Company install — GHL webhooks are unreliable for marketplace review.
+      // Immediately fetch all locations for this company and run provider config on each.
+      console.log('Bulk/Company install — fetching locations immediately, not waiting for webhooks');
+      // Fire and forget — don't block the Connected screen response
+      setImmediate(async () => {
+        try {
+          console.log(`Fetching locations for companyId: ${companyId}`);
+          const locResponse = await axios.get(
+            'https://services.leadconnectorhq.com/locations/search',
+            {
+              params: { companyId, limit: 100 },
+              headers: {
+                'Authorization': `Bearer ${companyToken}`,
+                'Version': '2021-07-28'
+              }
+            }
+          );
+          const locations = locResponse.data?.locations || locResponse.data?.data || [];
+          console.log(`Found ${locations.length} locations for company ${companyId}`);
+
+          for (const loc of locations) {
+            const locId = loc.id || loc._id;
+            if (!locId) continue;
+            console.log(`Processing location: ${locId} (${loc.name || 'unnamed'})`);
+            // Seed store so getLocationToken can find companyId
+            locationStore[locId] = { access_token: companyToken, companyId, locationId: locId };
+            locationStore[`company_${locId}`] = { access_token: companyToken, companyId };
+            saveStore(locationStore);
+            try {
+              const providerResult = await createProviderConfig(locId, companyToken);
+              locationStore[locId].providerId = providerResult?.id || providerResult?._id;
+              locationStore[locId].installed_at = new Date().toISOString();
+              saveStore(locationStore);
+              console.log(`✅ Provider config complete for location ${locId}`);
+            } catch (provErr) {
+              console.error(`Provider config FAILED for ${locId}:`, JSON.stringify(provErr?.response?.data || provErr.message));
+            }
+          }
+          console.log(`✅ Bulk install complete for companyId: ${companyId}`);
+        } catch (fetchErr) {
+          console.error('Failed to fetch locations for bulk install:', JSON.stringify(fetchErr?.response?.data || fetchErr.message));
+          console.error('Status:', fetchErr?.response?.status);
+        }
+      });
     } else if (locationId) {
       // Direct single-location install — run provider config immediately
       console.log(`Direct location install. locationId: ${locationId}`);
@@ -238,7 +278,6 @@ app.get('/oauth/callback', async (req, res) => {
         console.error('Status:', provErr?.response?.status);
       }
     } else {
-      // No locationId in token response — try install webhook path
       console.log('No locationId in token response — provider config will be handled by install webhook');
     }
 
