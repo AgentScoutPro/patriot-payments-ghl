@@ -163,7 +163,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.0.0',
+    version: '3.1.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -228,18 +228,34 @@ app.get('/oauth/callback', async (req, res) => {
       setImmediate(async () => {
         try {
           console.log(`Fetching locations for companyId: ${companyId}`);
-          const locResponse = await axios.get(
-            'https://services.leadconnectorhq.com/locations/search',
-            {
-              params: { companyId, limit: 100 },
-              headers: {
-                'Authorization': `Bearer ${companyToken}`,
-                'Version': '2021-07-28'
+          let locations = [];
+          try {
+            const locResponse = await axios.get(
+              'https://services.leadconnectorhq.com/locations/search',
+              {
+                params: { companyId, limit: 100 },
+                headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28' }
               }
+            );
+            locations = locResponse.data?.locations || locResponse.data?.data || [];
+            console.log(`locations/search: found ${locations.length} locations`);
+          } catch (primaryErr) {
+            console.warn(`locations/search failed (${primaryErr?.response?.status}) — trying companies endpoint`);
+            try {
+              const fallbackRes = await axios.get(
+                `https://services.leadconnectorhq.com/companies/${companyId}/locations`,
+                {
+                  params: { limit: 100 },
+                  headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28' }
+                }
+              );
+              locations = fallbackRes.data?.locations || fallbackRes.data?.data || [];
+              console.log(`companies endpoint: found ${locations.length} locations`);
+            } catch (fallbackErr) {
+              console.error(`Both location endpoints failed. fallback status: ${fallbackErr?.response?.status}`, JSON.stringify(fallbackErr?.response?.data || fallbackErr.message));
             }
-          );
-          const locations = locResponse.data?.locations || locResponse.data?.data || [];
-          console.log(`Found ${locations.length} locations for company ${companyId}`);
+          }
+          console.log(`Processing ${locations.length} locations for company ${companyId}`);
 
           for (const loc of locations) {
             const locId = loc.id || loc._id;
@@ -564,7 +580,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.0 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.1 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
