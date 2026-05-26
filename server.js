@@ -83,31 +83,36 @@ async function getLocationToken(companyToken, locationId) {
 
 // ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
 // Two-step process per GHL docs:
-// Step 1: POST /payments/custom-provider/connect — creates basic integration (needs location token)
+// Step 1: POST /payments/custom-provider/connect — creates basic integration
 // Step 2: POST /payments/custom-provider/connect/config — sets test/live keys
-async function createProviderConfig(locationId, companyToken) {
-  // FIX #1 APPLIED: Always exchange for a location-scoped token first
-  const locationToken = await getLocationToken(companyToken, locationId);
+// altType: 'location' for single-location installs, 'company' for bulk/agency installs
+async function createProviderConfig(altId, companyToken, altType = 'location') {
+  let authToken = companyToken;
+
+  // For location installs, exchange for a location-scoped token
+  if (altType === 'location') {
+    authToken = await getLocationToken(companyToken, altId);
+  } else {
+    console.log(`Using company token directly for altType: ${altType}, altId: ${altId}`);
+  }
 
   const headers = {
-    'Authorization': `Bearer ${locationToken}`,
+    'Authorization': `Bearer ${authToken}`,
     'Content-Type': 'application/json',
     'Version': '2021-07-28'
   };
 
-  // Step 1: Create the basic integration
-  // This is what makes the app appear under Payments > Integrations
   const integrationPayload = {
     name: 'Patriot Payments',
     description: 'Transparent, no contract payment processing built for small businesses powered by Accept Blue.',
     imageUrl: 'https://patriot-payments-ghl.onrender.com/assets/patriot-logo.png',
-    altId: locationId,
-    altType: 'location',
+    altId: altId,
+    altType: altType,
     queryUrl: `${BASE_URL}/payments/query`,
     paymentsUrl: `${BASE_URL}/payments/checkout`
   };
 
-  console.log('Step 1: Creating integration for locationId:', locationId);
+  console.log(`Step 1: Creating integration — altType: ${altType}, altId: ${altId}`);
   const integrationResponse = await axios.post(
     'https://services.leadconnectorhq.com/payments/custom-provider/connect',
     integrationPayload,
@@ -117,7 +122,7 @@ async function createProviderConfig(locationId, companyToken) {
 
   // Step 2: Connect test and live config keys
   const configPayload = {
-    locationId: locationId,
+    locationId: altId,
     liveMode: {
       apiKey: API_KEY,
       publishableKey: API_KEY
@@ -128,7 +133,7 @@ async function createProviderConfig(locationId, companyToken) {
     }
   };
 
-  console.log('Step 2: Connecting test/live config for locationId:', locationId);
+  console.log('Step 2: Connecting test/live config');
   try {
     const configResponse = await axios.post(
       'https://services.leadconnectorhq.com/payments/custom-provider/connect/config',
@@ -163,7 +168,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.1.0',
+    version: '3.2.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -221,64 +226,20 @@ app.get('/oauth/callback', async (req, res) => {
     console.log(`Company token stored for companyId: ${companyId}`);
 
     if (isBulk || userType === 'Company') {
-      // Bulk/Company install — GHL webhooks are unreliable for marketplace review.
-      // Immediately fetch all locations for this company and run provider config on each.
-      console.log('Bulk/Company install — fetching locations immediately, not waiting for webhooks');
-      // Fire and forget — don't block the Connected screen response
+      // Bulk/Company install — register provider at company level directly.
+      // No location fetch needed — use altType:'company' with the companyId.
+      console.log(`Bulk/Company install — registering provider config at company level for ${companyId}`);
       setImmediate(async () => {
         try {
-          console.log(`Fetching locations for companyId: ${companyId}`);
-          let locations = [];
-          try {
-            const locResponse = await axios.get(
-              'https://services.leadconnectorhq.com/locations/search',
-              {
-                params: { companyId, limit: 100 },
-                headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28' }
-              }
-            );
-            locations = locResponse.data?.locations || locResponse.data?.data || [];
-            console.log(`locations/search: found ${locations.length} locations`);
-          } catch (primaryErr) {
-            console.warn(`locations/search failed (${primaryErr?.response?.status}) — trying companies endpoint`);
-            try {
-              const fallbackRes = await axios.get(
-                `https://services.leadconnectorhq.com/companies/${companyId}/locations`,
-                {
-                  params: { limit: 100 },
-                  headers: { 'Authorization': `Bearer ${companyToken}`, 'Version': '2021-07-28' }
-                }
-              );
-              locations = fallbackRes.data?.locations || fallbackRes.data?.data || [];
-              console.log(`companies endpoint: found ${locations.length} locations`);
-            } catch (fallbackErr) {
-              console.error(`Both location endpoints failed. fallback status: ${fallbackErr?.response?.status}`, JSON.stringify(fallbackErr?.response?.data || fallbackErr.message));
-            }
-          }
-          console.log(`Processing ${locations.length} locations for company ${companyId}`);
-
-          for (const loc of locations) {
-            const locId = loc.id || loc._id;
-            if (!locId) continue;
-            console.log(`Processing location: ${locId} (${loc.name || 'unnamed'})`);
-            // Seed store so getLocationToken can find companyId
-            locationStore[locId] = { access_token: companyToken, companyId, locationId: locId };
-            locationStore[`company_${locId}`] = { access_token: companyToken, companyId };
-            saveStore(locationStore);
-            try {
-              const providerResult = await createProviderConfig(locId, companyToken);
-              locationStore[locId].providerId = providerResult?.id || providerResult?._id;
-              locationStore[locId].installed_at = new Date().toISOString();
-              saveStore(locationStore);
-              console.log(`✅ Provider config complete for location ${locId}`);
-            } catch (provErr) {
-              console.error(`Provider config FAILED for ${locId}:`, JSON.stringify(provErr?.response?.data || provErr.message));
-            }
-          }
-          console.log(`✅ Bulk install complete for companyId: ${companyId}`);
-        } catch (fetchErr) {
-          console.error('Failed to fetch locations for bulk install:', JSON.stringify(fetchErr?.response?.data || fetchErr.message));
-          console.error('Status:', fetchErr?.response?.status);
+          const providerResult = await createProviderConfig(companyId, companyToken, 'company');
+          locationStore[`company_${companyId}`].providerId = providerResult?.id || providerResult?._id;
+          saveStore(locationStore);
+          console.log(`✅ Company-level provider config complete for ${companyId}`);
+        } catch (provErr) {
+          console.error(`Company provider config FAILED:`, JSON.stringify(provErr?.response?.data || provErr.message));
+          console.error(`Status:`, provErr?.response?.status);
+          // If company-level fails, log the full error for diagnosis
+          console.error(`Full error:`, JSON.stringify(provErr?.response?.data));
         }
       });
     } else if (locationId) {
@@ -580,7 +541,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.1 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.2 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
