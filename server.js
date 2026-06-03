@@ -107,8 +107,10 @@ async function createProviderConfig(locationId, companyToken) {
   );
   console.log('Step 1 SUCCESS:', JSON.stringify(integrationResponse.data));
 
+  // FIX: Use altId/altType instead of locationId in config payload
   const configPayload = {
-    locationId,
+    altId: locationId,
+    altType: 'location',
     liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
     testMode: {
       apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
@@ -151,7 +153,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.4.0',
+    version: '3.5.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -525,26 +527,9 @@ app.post('/payments/process', async (req, res) => {
   }
 });
 
-
-app.post('/admin/register', async (req, res) => {
-  const { locationId, secret } = req.body;
-  if (secret !== 'pp2026') return res.status(401).json({ error: 'unauthorized' });
-  const companyToken = locationStore['company_oWY1LzuHYhbViH7xCOQl']?.access_token;
-  if (!companyToken) return res.status(404).json({ error: 'no company token — reinstall app first' });
-  locationStore[locationId] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl', locationId };
-  locationStore[`company_${locationId}`] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl' };
-  saveStore(locationStore);
-  console.log(`=== ADMIN REGISTER triggered for locationId: ${locationId} ===`);
-  try {
-    const result = await createProviderConfig(locationId, companyToken);
-    res.json({ success: true, result });
-  } catch (e) {
-    res.status(500).json({ error: e?.response?.data || e.message, status: e?.response?.status });
-  }
-});
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.4 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.5 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
