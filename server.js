@@ -50,8 +50,6 @@ function saveStore(store) {
 let locationStore = loadStore();
 
 // ─── GET LOCATION TOKEN ───────────────────────────────────────────────────────
-// Exchange company token for a location-scoped token.
-// POST /payments/custom-provider/connect requires a location token, NOT a company token.
 async function getLocationToken(companyToken, locationId) {
   console.log(`Exchanging company token for location token. locationId: ${locationId}`);
   try {
@@ -82,15 +80,7 @@ async function getLocationToken(companyToken, locationId) {
 }
 
 // ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
-// FIX: altType must always be 'location' — GHL does not support altType:'company'
-// on /payments/custom-provider/connect. Company/bulk installs must register
-// each location individually via the install webhook.
-//
-// Two-step process per GHL docs:
-// Step 1: POST /payments/custom-provider/connect — creates basic integration
-// Step 2: POST /payments/custom-provider/connect/config — sets test/live keys
 async function createProviderConfig(locationId, companyToken) {
-  // Always exchange for a location-scoped token — required by GHL
   const authToken = await getLocationToken(companyToken, locationId);
 
   const headers = {
@@ -99,7 +89,6 @@ async function createProviderConfig(locationId, companyToken) {
     'Version': '2021-07-28'
   };
 
-  // FIX: Only include fields GHL spec requires — no description/imageUrl
   const integrationPayload = {
     name: 'Patriot Payments',
     altId: locationId,
@@ -118,13 +107,9 @@ async function createProviderConfig(locationId, companyToken) {
   );
   console.log('Step 1 SUCCESS:', JSON.stringify(integrationResponse.data));
 
-  // Step 2: Connect test and live config keys
   const configPayload = {
     locationId,
-    liveMode: {
-      apiKey: API_KEY,
-      publishableKey: API_KEY
-    },
+    liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
     testMode: {
       apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
       publishableKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY
@@ -166,7 +151,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.3.0',
+    version: '3.4.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -207,7 +192,6 @@ app.get('/oauth/callback', async (req, res) => {
 
     console.log(`userType: ${userType}, isBulkInstallation: ${isBulk}, companyId: ${companyId}, locationId: ${locationId}`);
 
-    // Store company token so install webhook can find it
     const companyEntry = {
       access_token: companyToken,
       refresh_token: tokenResponse.data.refresh_token,
@@ -223,13 +207,8 @@ app.get('/oauth/callback', async (req, res) => {
     console.log(`Company token stored for companyId: ${companyId}`);
 
     if (isBulk || userType === 'Company') {
-      // FIX: Company/bulk install — DO NOT call /payments/custom-provider/connect here.
-      // altType:'company' is NOT supported by GHL's payment provider endpoint.
-      // The install webhook fires per-location after OAuth and handles registration there.
       console.log(`Bulk/Company install for companyId: ${companyId} — provider config deferred to install webhook`);
-
     } else if (locationId) {
-      // Direct single-location install — register immediately
       console.log(`Direct location install. locationId: ${locationId}`);
       try {
         const providerResult = await createProviderConfig(locationId, companyToken);
@@ -277,32 +256,21 @@ app.get('/oauth/callback', async (req, res) => {
 });
 
 // ─── INSTALL WEBHOOK ──────────────────────────────────────────────────────────
-// This fires per-location after OAuth — this is where provider registration happens
-// for both bulk/company installs AND single-location installs as a safety net.
 app.post('/webhooks/install', async (req, res) => {
   res.status(200).json({ success: true });
   const { locationId, companyId } = req.body;
   console.log('=== INSTALL WEBHOOK ===', JSON.stringify(req.body, null, 2));
-  if (!locationId || !companyId) {
-    console.log('Missing locationId or companyId in install webhook');
-    return;
-  }
+  if (!locationId || !companyId) { console.log('Missing locationId or companyId in install webhook'); return; }
 
   const companyToken = findCompanyToken(companyId);
-  if (!companyToken) {
-    console.error(`No company token found for companyId: ${companyId}`);
-    return;
-  }
+  if (!companyToken) { console.error(`No company token found for companyId: ${companyId}`); return; }
 
-  // Ensure location entry exists with companyId for token exchange lookup
   if (!locationStore[locationId]) {
     locationStore[locationId] = { access_token: companyToken, companyId, locationId };
   }
   locationStore[`company_${locationId}`] = { access_token: companyToken, companyId };
   saveStore(locationStore);
 
-  // FIX: 5 second delay — gives GHL time to fully propagate the install
-  // before we attempt provider registration
   await new Promise(resolve => setTimeout(resolve, 5000));
 
   try {
@@ -352,9 +320,7 @@ app.post('/webhooks', async (req, res) => {
     try {
       const result = await createProviderConfig(locationId, companyToken);
       locationStore[locationId] = {
-        access_token: companyToken,
-        companyId,
-        locationId,
+        access_token: companyToken, companyId, locationId,
         providerId: result?.id || result?._id,
         installed_at: new Date().toISOString()
       };
@@ -367,6 +333,31 @@ app.post('/webhooks', async (req, res) => {
   }
 
   res.status(200).json({ success: true });
+});
+
+// ─── ADMIN REGISTER (temporary — remove after approval) ──────────────────────
+app.post('/admin/register', async (req, res) => {
+  const { locationId, secret } = req.body;
+  if (secret !== 'pp2026') return res.status(401).json({ error: 'unauthorized' });
+  const companyToken = locationStore['company_oWY1LzuHYhbViH7xCOQl']?.access_token;
+  if (!companyToken) return res.status(404).json({ error: 'no company token — reinstall app first' });
+  locationStore[locationId] = {
+    access_token: companyToken,
+    companyId: 'oWY1LzuHYhbViH7xCOQl',
+    locationId
+  };
+  locationStore[`company_${locationId}`] = {
+    access_token: companyToken,
+    companyId: 'oWY1LzuHYhbViH7xCOQl'
+  };
+  saveStore(locationStore);
+  console.log(`=== ADMIN REGISTER triggered for locationId: ${locationId} ===`);
+  try {
+    const result = await createProviderConfig(locationId, companyToken);
+    res.json({ success: true, result });
+  } catch (e) {
+    res.status(500).json({ error: e?.response?.data || e.message, status: e?.response?.status });
+  }
 });
 
 // ─── SETUP PAGE ───────────────────────────────────────────────────────────────
@@ -536,7 +527,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.3 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.4 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
