@@ -49,64 +49,69 @@ function saveStore(store) {
 
 let locationStore = loadStore();
 
-// ─── BUILD PROVIDER HEADERS ───────────────────────────────────────────────────
+// ─── BUILD HEADERS ────────────────────────────────────────────────────────────
 function buildHeaders(token) {
   return {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
+    'Accept': 'application/json',
     'Version': '2021-07-28'
   };
 }
 
-// ─── CREATE PROVIDER CONFIG (with token passed directly) ─────────────────────
-// Used for Location installs — token is already location-scoped from OAuth.
-// Sends locationId, altId, altType together to satisfy GHL validation.
+// ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
+// FIX v3.8: Correct endpoint, locationId as query param, all required body fields
+// Endpoint: POST /payments/custom-provider/provider?locationId=xxx
+// Token type: Sub-Account Token (location-scoped OAuth token)
 async function createProviderConfigWithToken(locationId, token) {
   const headers = buildHeaders(token);
 
-  // FIX v3.7: Send locationId + altId + altType together
-  // GHL validates for "locationId" field explicitly even on altType:location calls
+  // Step 1: Create provider — locationId in query string, full body per GHL spec
   const integrationPayload = {
     name: 'Patriot Payments',
-    locationId: locationId,
-    altId: locationId,
-    altType: 'location',
+    description: 'Transparent, no contract payment processing built for small businesses powered by Accept Blue.',
+    paymentsUrl: `${BASE_URL}/payments/checkout`,
     queryUrl: `${BASE_URL}/payments/query`,
-    paymentsUrl: `${BASE_URL}/payments/checkout`
+    imageUrl: `${BASE_URL}/assets/patriot-logo.png`,
+    supportsSubscriptionSchedule: false
   };
 
-  console.log(`Step 1: Creating integration for locationId: ${locationId}`);
+  console.log(`Step 1: Creating provider for locationId: ${locationId}`);
+  console.log('Endpoint: POST /payments/custom-provider/provider?locationId=' + locationId);
   console.log('Payload:', JSON.stringify(integrationPayload));
 
   const integrationResponse = await axios.post(
-    'https://services.leadconnectorhq.com/payments/custom-provider/connect',
+    `https://services.leadconnectorhq.com/payments/custom-provider/provider?locationId=${locationId}`,
     integrationPayload,
     { headers }
   );
   console.log('Step 1 SUCCESS:', JSON.stringify(integrationResponse.data));
 
-  // FIX v3.7: Send locationId + altId + altType together in config too
-  const configPayload = {
-    locationId: locationId,
-    altId: locationId,
-    altType: 'location',
-    liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
-    testMode: {
-      apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
-      publishableKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY
-    }
-  };
+  const providerId = integrationResponse.data?._id || integrationResponse.data?.id;
+  console.log(`Provider ID: ${providerId}`);
 
-  console.log('Step 2: Connecting test/live config');
-  try {
-    const configResponse = await axios.post(
-      'https://services.leadconnectorhq.com/payments/custom-provider/connect/config',
-      configPayload,
-      { headers }
-    );
-    console.log('Step 2 SUCCESS:', JSON.stringify(configResponse.data));
-  } catch (configErr) {
-    console.log('Step 2 status:', configErr?.response?.status, JSON.stringify(configErr?.response?.data));
+  // Step 2: Connect test/live config keys
+  if (providerId) {
+    const configPayload = {
+      locationId,
+      liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
+      testMode: {
+        apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
+        publishableKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY
+      }
+    };
+
+    console.log('Step 2: Connecting test/live config');
+    try {
+      const configResponse = await axios.post(
+        `https://services.leadconnectorhq.com/payments/custom-provider/connect/config`,
+        configPayload,
+        { headers }
+      );
+      console.log('Step 2 SUCCESS:', JSON.stringify(configResponse.data));
+    } catch (configErr) {
+      console.log('Step 2 status:', configErr?.response?.status, JSON.stringify(configErr?.response?.data));
+    }
   }
 
   return integrationResponse.data;
@@ -136,7 +141,7 @@ async function getLocationToken(companyToken, locationId) {
   }
 }
 
-// ─── CREATE PROVIDER CONFIG (with token exchange) ────────────────────────────
+// ─── CREATE PROVIDER CONFIG (with token exchange for webhook path) ────────────
 async function createProviderConfig(locationId, companyToken) {
   const authToken = await getLocationToken(companyToken, locationId);
   return createProviderConfigWithToken(locationId, authToken);
@@ -162,7 +167,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.7.0',
+    version: '3.8.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -221,12 +226,13 @@ app.get('/oauth/callback', async (req, res) => {
       console.log(`Bulk/Company install for companyId: ${companyId} — deferred to install webhook`);
 
     } else if (locationId) {
-      // Location install — OAuth token is already location-scoped, use directly
+      // Location install — OAuth token is already location-scoped (Sub-Account Token)
+      // Use it directly per GHL spec
       console.log(`Direct location install. locationId: ${locationId}`);
       try {
         const providerResult = await createProviderConfigWithToken(locationId, accessToken);
         console.log('✅ Provider config complete:', JSON.stringify(providerResult));
-        locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
+        locationStore[locationId].providerId = providerResult?._id || providerResult?.id;
         saveStore(locationStore);
       } catch (provErr) {
         console.error('Provider config FAILED:', JSON.stringify(provErr?.response?.data || provErr.message));
@@ -291,7 +297,7 @@ app.post('/webhooks/install', async (req, res) => {
     const providerResult = await createProviderConfig(locationId, companyToken);
     locationStore[locationId] = {
       access_token: companyToken, companyId, locationId,
-      providerId: providerResult?.id || providerResult?._id,
+      providerId: providerResult?._id || providerResult?.id,
       installed_at: new Date().toISOString()
     };
     saveStore(locationStore);
@@ -333,7 +339,7 @@ app.post('/webhooks', async (req, res) => {
       const result = await createProviderConfig(locationId, companyToken);
       locationStore[locationId] = {
         access_token: companyToken, companyId, locationId,
-        providerId: result?.id || result?._id,
+        providerId: result?._id || result?.id,
         installed_at: new Date().toISOString()
       };
       saveStore(locationStore);
@@ -351,14 +357,15 @@ app.post('/webhooks', async (req, res) => {
 app.post('/admin/register', async (req, res) => {
   const { locationId, secret } = req.body;
   if (secret !== 'pp2026') return res.status(401).json({ error: 'unauthorized' });
-  const companyToken = locationStore['company_oWY1LzuHYhbViH7xCOQl']?.access_token;
-  if (!companyToken) return res.status(404).json({ error: 'no company token — reinstall app first' });
-  locationStore[locationId] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl', locationId };
-  locationStore[`company_${locationId}`] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl' };
+  const locationToken = locationStore[locationId]?.access_token
+    || locationStore['company_oWY1LzuHYhbViH7xCOQl']?.access_token;
+  if (!locationToken) return res.status(404).json({ error: 'no token found — reinstall app first' });
+  locationStore[locationId] = locationStore[locationId] || { access_token: locationToken, companyId: 'oWY1LzuHYhbViH7xCOQl', locationId };
+  locationStore[`company_${locationId}`] = { access_token: locationToken, companyId: 'oWY1LzuHYhbViH7xCOQl' };
   saveStore(locationStore);
   console.log(`=== ADMIN REGISTER triggered for locationId: ${locationId} ===`);
   try {
-    const result = await createProviderConfig(locationId, companyToken);
+    const result = await createProviderConfigWithToken(locationId, locationToken);
     res.json({ success: true, result });
   } catch (e) {
     res.status(500).json({ error: e?.response?.data || e.message, status: e?.response?.status });
@@ -532,7 +539,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.7 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.8 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
