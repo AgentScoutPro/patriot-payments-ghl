@@ -59,13 +59,16 @@ function buildHeaders(token) {
 }
 
 // ─── CREATE PROVIDER CONFIG (with token passed directly) ─────────────────────
-// Used when we already have a location-scoped token (Location install via OAuth).
-// Does NOT attempt any token exchange — uses the token as-is.
+// Used for Location installs — token is already location-scoped from OAuth.
+// Sends locationId, altId, altType together to satisfy GHL validation.
 async function createProviderConfigWithToken(locationId, token) {
   const headers = buildHeaders(token);
 
+  // FIX v3.7: Send locationId + altId + altType together
+  // GHL validates for "locationId" field explicitly even on altType:location calls
   const integrationPayload = {
     name: 'Patriot Payments',
+    locationId: locationId,
     altId: locationId,
     altType: 'location',
     queryUrl: `${BASE_URL}/payments/query`,
@@ -82,7 +85,9 @@ async function createProviderConfigWithToken(locationId, token) {
   );
   console.log('Step 1 SUCCESS:', JSON.stringify(integrationResponse.data));
 
+  // FIX v3.7: Send locationId + altId + altType together in config too
   const configPayload = {
+    locationId: locationId,
     altId: locationId,
     altType: 'location',
     liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
@@ -108,8 +113,6 @@ async function createProviderConfigWithToken(locationId, token) {
 }
 
 // ─── GET LOCATION TOKEN ───────────────────────────────────────────────────────
-// Attempts to exchange a company token for a location-scoped token.
-// Used by the install webhook (bulk/company installs) as a fallback path.
 async function getLocationToken(companyToken, locationId) {
   console.log(`Exchanging company token for location token. locationId: ${locationId}`);
   try {
@@ -134,8 +137,6 @@ async function getLocationToken(companyToken, locationId) {
 }
 
 // ─── CREATE PROVIDER CONFIG (with token exchange) ────────────────────────────
-// Used by install webhook — attempts location token exchange first,
-// falls back to company token if exchange fails.
 async function createProviderConfig(locationId, companyToken) {
   const authToken = await getLocationToken(companyToken, locationId);
   return createProviderConfigWithToken(locationId, authToken);
@@ -161,7 +162,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.6.0',
+    version: '3.7.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -202,7 +203,6 @@ app.get('/oauth/callback', async (req, res) => {
 
     console.log(`userType: ${userType}, isBulkInstallation: ${isBulk}, companyId: ${companyId}, locationId: ${locationId}`);
 
-    // Store tokens
     const entry = {
       access_token: accessToken,
       refresh_token: tokenResponse.data.refresh_token,
@@ -218,13 +218,10 @@ app.get('/oauth/callback', async (req, res) => {
     console.log(`Token stored for companyId: ${companyId}${locationId ? `, locationId: ${locationId}` : ''}`);
 
     if (isBulk || userType === 'Company') {
-      // Bulk/company install — no location token available yet.
-      // Provider registration handled by install webhook per location.
       console.log(`Bulk/Company install for companyId: ${companyId} — deferred to install webhook`);
 
     } else if (locationId) {
-      // FIX: Location install — the OAuth token IS already location-scoped.
-      // Use it directly — do NOT attempt token exchange.
+      // Location install — OAuth token is already location-scoped, use directly
       console.log(`Direct location install. locationId: ${locationId}`);
       try {
         const providerResult = await createProviderConfigWithToken(locationId, accessToken);
@@ -535,7 +532,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.6 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.7 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
