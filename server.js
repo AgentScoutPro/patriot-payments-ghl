@@ -90,28 +90,26 @@ async function createProviderConfigWithToken(locationId, token) {
   const providerId = integrationResponse.data?._id || integrationResponse.data?.id;
   console.log(`Provider ID: ${providerId}`);
 
-  // Step 2: Connect test/live config keys
-  if (providerId) {
-    const configPayload = {
-      locationId,
-      liveMode: { apiKey: API_KEY, publishableKey: API_KEY },
-      testMode: {
-        apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
-        publishableKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY
-      }
-    };
-
-    console.log('Step 2: Connecting test/live config');
-    try {
-      const configResponse = await axios.post(
-        `https://services.leadconnectorhq.com/payments/custom-provider/connect/config`,
-        configPayload,
-        { headers }
-      );
-      console.log('Step 2 SUCCESS:', JSON.stringify(configResponse.data));
-    } catch (configErr) {
-      console.log('Step 2 status:', configErr?.response?.status, JSON.stringify(configErr?.response?.data));
+  // Step 2: POST /payments/custom-provider/connect?locationId=xxx
+  // Body: { live: { apiKey, publishableKey }, test: { apiKey, publishableKey } }
+  const configPayload = {
+    live: { apiKey: API_KEY, publishableKey: API_KEY },
+    test: {
+      apiKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY,
+      publishableKey: ACCEPT_BLUE_API_KEY_SANDBOX || API_KEY
     }
+  };
+
+  console.log('Step 2: Connecting provider config');
+  try {
+    const configResponse = await axios.post(
+      `https://services.leadconnectorhq.com/payments/custom-provider/connect?locationId=${locationId}`,
+      configPayload,
+      { headers }
+    );
+    console.log('Step 2 SUCCESS:', JSON.stringify(configResponse.data));
+  } catch (configErr) {
+    console.log('Step 2 status:', configErr?.response?.status, JSON.stringify(configErr?.response?.data));
   }
 
   return integrationResponse.data;
@@ -167,7 +165,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.8.0',
+    version: '3.9.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -539,7 +537,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.8 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.9 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
