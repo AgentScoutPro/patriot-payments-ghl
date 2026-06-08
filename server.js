@@ -49,45 +49,20 @@ function saveStore(store) {
 
 let locationStore = loadStore();
 
-// ─── GET LOCATION TOKEN ───────────────────────────────────────────────────────
-async function getLocationToken(companyToken, locationId) {
-  console.log(`Exchanging company token for location token. locationId: ${locationId}`);
-  try {
-    const companyId = locationStore[`company_${locationId}`]?.companyId
-      || locationStore[locationId]?.companyId
-      || null;
-    const response = await axios.post(
-      'https://services.leadconnectorhq.com/oauth/locationToken',
-      { companyId, locationId },
-      {
-        headers: {
-          'Authorization': `Bearer ${companyToken}`,
-          'Content-Type': 'application/json',
-          'Version': '2021-07-28'
-        }
-      }
-    );
-    const locationToken = response.data?.access_token;
-    if (!locationToken) throw new Error('No access_token in locationToken response');
-    console.log(`✅ Location token obtained for ${locationId}`);
-    return locationToken;
-  } catch (err) {
-    console.error('getLocationToken FAILED:', JSON.stringify(err?.response?.data || err.message));
-    console.error('Status:', err?.response?.status);
-    console.warn('⚠️ Falling back to company token for provider config');
-    return companyToken;
-  }
-}
-
-// ─── CREATE PROVIDER CONFIG ───────────────────────────────────────────────────
-async function createProviderConfig(locationId, companyToken) {
-  const authToken = await getLocationToken(companyToken, locationId);
-
-  const headers = {
-    'Authorization': `Bearer ${authToken}`,
+// ─── BUILD PROVIDER HEADERS ───────────────────────────────────────────────────
+function buildHeaders(token) {
+  return {
+    'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
     'Version': '2021-07-28'
   };
+}
+
+// ─── CREATE PROVIDER CONFIG (with token passed directly) ─────────────────────
+// Used when we already have a location-scoped token (Location install via OAuth).
+// Does NOT attempt any token exchange — uses the token as-is.
+async function createProviderConfigWithToken(locationId, token) {
+  const headers = buildHeaders(token);
 
   const integrationPayload = {
     name: 'Patriot Payments',
@@ -107,7 +82,6 @@ async function createProviderConfig(locationId, companyToken) {
   );
   console.log('Step 1 SUCCESS:', JSON.stringify(integrationResponse.data));
 
-  // FIX: Use altId/altType instead of locationId in config payload
   const configPayload = {
     altId: locationId,
     altType: 'location',
@@ -133,6 +107,40 @@ async function createProviderConfig(locationId, companyToken) {
   return integrationResponse.data;
 }
 
+// ─── GET LOCATION TOKEN ───────────────────────────────────────────────────────
+// Attempts to exchange a company token for a location-scoped token.
+// Used by the install webhook (bulk/company installs) as a fallback path.
+async function getLocationToken(companyToken, locationId) {
+  console.log(`Exchanging company token for location token. locationId: ${locationId}`);
+  try {
+    const companyId = locationStore[`company_${locationId}`]?.companyId
+      || locationStore[locationId]?.companyId
+      || null;
+    const response = await axios.post(
+      'https://services.leadconnectorhq.com/oauth/locationToken',
+      { companyId, locationId },
+      { headers: buildHeaders(companyToken) }
+    );
+    const locationToken = response.data?.access_token;
+    if (!locationToken) throw new Error('No access_token in locationToken response');
+    console.log(`✅ Location token obtained for ${locationId}`);
+    return locationToken;
+  } catch (err) {
+    console.error('getLocationToken FAILED:', JSON.stringify(err?.response?.data || err.message));
+    console.error('Status:', err?.response?.status);
+    console.warn('⚠️ Falling back to company token');
+    return companyToken;
+  }
+}
+
+// ─── CREATE PROVIDER CONFIG (with token exchange) ────────────────────────────
+// Used by install webhook — attempts location token exchange first,
+// falls back to company token if exchange fails.
+async function createProviderConfig(locationId, companyToken) {
+  const authToken = await getLocationToken(companyToken, locationId);
+  return createProviderConfigWithToken(locationId, authToken);
+}
+
 // ─── FIND COMPANY TOKEN ───────────────────────────────────────────────────────
 function findCompanyToken(companyId) {
   if (locationStore[`company_${companyId}`]?.access_token) {
@@ -153,7 +161,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.5.0',
+    version: '3.6.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -186,7 +194,7 @@ app.get('/oauth/callback', async (req, res) => {
     console.log('=== TOKEN RESPONSE ===');
     console.log(JSON.stringify(tokenResponse.data, null, 2));
 
-    const companyToken = tokenResponse.data.access_token;
+    const accessToken = tokenResponse.data.access_token;
     const companyId = tokenResponse.data.companyId;
     const isBulk = tokenResponse.data.isBulkInstallation;
     const userType = tokenResponse.data.userType;
@@ -194,35 +202,42 @@ app.get('/oauth/callback', async (req, res) => {
 
     console.log(`userType: ${userType}, isBulkInstallation: ${isBulk}, companyId: ${companyId}, locationId: ${locationId}`);
 
-    const companyEntry = {
-      access_token: companyToken,
+    // Store tokens
+    const entry = {
+      access_token: accessToken,
       refresh_token: tokenResponse.data.refresh_token,
       companyId,
       connected_at: new Date().toISOString()
     };
-    locationStore[`company_${companyId}`] = companyEntry;
+    locationStore[`company_${companyId}`] = entry;
     if (locationId) {
-      locationStore[locationId] = { ...companyEntry, locationId };
-      locationStore[`company_${locationId}`] = { ...companyEntry, companyId };
+      locationStore[locationId] = { ...entry, locationId };
+      locationStore[`company_${locationId}`] = { ...entry, companyId };
     }
     saveStore(locationStore);
-    console.log(`Company token stored for companyId: ${companyId}`);
+    console.log(`Token stored for companyId: ${companyId}${locationId ? `, locationId: ${locationId}` : ''}`);
 
     if (isBulk || userType === 'Company') {
-      console.log(`Bulk/Company install for companyId: ${companyId} — provider config deferred to install webhook`);
+      // Bulk/company install — no location token available yet.
+      // Provider registration handled by install webhook per location.
+      console.log(`Bulk/Company install for companyId: ${companyId} — deferred to install webhook`);
+
     } else if (locationId) {
+      // FIX: Location install — the OAuth token IS already location-scoped.
+      // Use it directly — do NOT attempt token exchange.
       console.log(`Direct location install. locationId: ${locationId}`);
       try {
-        const providerResult = await createProviderConfig(locationId, companyToken);
-        console.log('Provider config complete:', JSON.stringify(providerResult));
+        const providerResult = await createProviderConfigWithToken(locationId, accessToken);
+        console.log('✅ Provider config complete:', JSON.stringify(providerResult));
         locationStore[locationId].providerId = providerResult?.id || providerResult?._id;
         saveStore(locationStore);
       } catch (provErr) {
         console.error('Provider config FAILED:', JSON.stringify(provErr?.response?.data || provErr.message));
         console.error('Status:', provErr?.response?.status);
       }
+
     } else {
-      console.log('No locationId in token response — provider config will be handled by install webhook');
+      console.log('No locationId — provider config deferred to install webhook');
     }
 
     res.send(`<!DOCTYPE html><html><head><title>Patriot Payments Connected</title>
@@ -262,10 +277,10 @@ app.post('/webhooks/install', async (req, res) => {
   res.status(200).json({ success: true });
   const { locationId, companyId } = req.body;
   console.log('=== INSTALL WEBHOOK ===', JSON.stringify(req.body, null, 2));
-  if (!locationId || !companyId) { console.log('Missing locationId or companyId in install webhook'); return; }
+  if (!locationId || !companyId) { console.log('Missing locationId or companyId'); return; }
 
   const companyToken = findCompanyToken(companyId);
-  if (!companyToken) { console.error(`No company token found for companyId: ${companyId}`); return; }
+  if (!companyToken) { console.error(`No company token for companyId: ${companyId}`); return; }
 
   if (!locationStore[locationId]) {
     locationStore[locationId] = { access_token: companyToken, companyId, locationId };
@@ -278,9 +293,7 @@ app.post('/webhooks/install', async (req, res) => {
   try {
     const providerResult = await createProviderConfig(locationId, companyToken);
     locationStore[locationId] = {
-      access_token: companyToken,
-      companyId,
-      locationId,
+      access_token: companyToken, companyId, locationId,
       providerId: providerResult?.id || providerResult?._id,
       installed_at: new Date().toISOString()
     };
@@ -343,15 +356,8 @@ app.post('/admin/register', async (req, res) => {
   if (secret !== 'pp2026') return res.status(401).json({ error: 'unauthorized' });
   const companyToken = locationStore['company_oWY1LzuHYhbViH7xCOQl']?.access_token;
   if (!companyToken) return res.status(404).json({ error: 'no company token — reinstall app first' });
-  locationStore[locationId] = {
-    access_token: companyToken,
-    companyId: 'oWY1LzuHYhbViH7xCOQl',
-    locationId
-  };
-  locationStore[`company_${locationId}`] = {
-    access_token: companyToken,
-    companyId: 'oWY1LzuHYhbViH7xCOQl'
-  };
+  locationStore[locationId] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl', locationId };
+  locationStore[`company_${locationId}`] = { access_token: companyToken, companyId: 'oWY1LzuHYhbViH7xCOQl' };
   saveStore(locationStore);
   console.log(`=== ADMIN REGISTER triggered for locationId: ${locationId} ===`);
   try {
@@ -529,7 +535,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.5 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v3.6 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
