@@ -165,7 +165,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '3.9.0',
+    version: '4.0.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_path: STORE_PATH,
     base_url: BASE_URL
@@ -478,8 +478,12 @@ app.post('/payments/query', (req, res) => {
 });
 
 // ─── CHECKOUT PAGE ────────────────────────────────────────────────────────────
+// GHL loads this in an iframe and does NOT pass the amount via query string.
+// Flow per GHL spec: iframe posts 'custom_provider_ready' -> GHL posts back
+// 'payment_initiate_props' with the real amount/currency/contact/transactionId ->
+// iframe processes the charge -> iframe posts 'custom_element_success_response'
+// (or 'custom_element_error_response' / 'custom_element_close_response').
 app.get('/payments/checkout', (req, res) => {
-  const { amount, locationId, invoiceId } = req.query;
   res.send(`<!DOCTYPE html><html><head><title>Patriot Payments Checkout</title>
     <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}
     body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}
@@ -488,36 +492,100 @@ app.get('/payments/checkout', (req, res) => {
     .amount{font-size:32px;font-weight:700;color:#1B3A6B;margin-bottom:24px;}
     label{display:block;font-size:13px;font-weight:600;color:#333;margin-bottom:6px;margin-top:16px;}
     input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;}
+    input:disabled{background:#f0f0f0;}
     .row{display:flex;gap:12px;}.row>div{flex:1;}
     .btn{display:block;width:100%;padding:14px;background:#C0392B;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;margin-top:24px;}
-    .secure{text-align:center;font-size:12px;color:#888;margin-top:12px;}</style></head>
+    .btn:disabled{background:#ccc;cursor:not-allowed;}
+    .secure{text-align:center;font-size:12px;color:#888;margin-top:12px;}
+    .err{color:#C0392B;font-size:13px;margin-top:10px;text-align:center;}</style></head>
     <body><div class="card">
     <h2>🇺🇸 Patriot Payments</h2>
-    <div class="amount">$${parseFloat(amount||0).toFixed(2)}</div>
-    <label>Card Number</label><input type="text" id="cn" placeholder="1234 5678 9012 3456" maxlength="19"/>
+    <div class="amount" id="amountDisplay">Loading…</div>
+    <label>Card Number</label><input type="text" id="cn" placeholder="1234 5678 9012 3456" maxlength="19" disabled/>
     <div class="row">
-      <div><label>Expiry</label><input type="text" id="exp" placeholder="MM/YY" maxlength="5"/></div>
-      <div><label>CVV</label><input type="text" id="cvv" placeholder="123" maxlength="4"/></div>
+      <div><label>Expiry</label><input type="text" id="exp" placeholder="MM/YY" maxlength="5" disabled/></div>
+      <div><label>CVV</label><input type="text" id="cvv" placeholder="123" maxlength="4" disabled/></div>
     </div>
-    <label>Name on Card</label><input type="text" id="name" placeholder="Full name"/>
-    <button class="btn" onclick="pay()">Pay $${parseFloat(amount||0).toFixed(2)}</button>
+    <label>Name on Card</label><input type="text" id="name" placeholder="Full name" disabled/>
+    <button class="btn" id="payBtn" onclick="pay()" disabled>Loading…</button>
+    <p class="err" id="errMsg"></p>
     <p class="secure">🔒 Secured by Patriot Payments & Accept Blue</p></div>
     <script>
+    let paymentProps = null;
+
+    function setInputsEnabled(enabled){
+      ['cn','exp','cvv','name','payBtn'].forEach(id=>{
+        document.getElementById(id).disabled = !enabled;
+      });
+    }
+
+    // GHL only sends payment_initiate_props AFTER it sees this ready event.
+    window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
+
+    window.addEventListener('message', function(event){
+      const data = event.data;
+      if(!data || !data.type) return;
+
+      if(data.type === 'payment_initiate_props'){
+        paymentProps = data;
+        const amt = Number(data.amount || 0).toFixed(2);
+        document.getElementById('amountDisplay').textContent = '$' + amt;
+        document.getElementById('payBtn').textContent = 'Pay $' + amt;
+        setInputsEnabled(true);
+      }
+    });
+
     async function pay(){
-      const r=await fetch('/payments/process',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cardNumber:document.getElementById('cn').value.replace(/\s/g,''),
-      expiry:document.getElementById('exp').value,cvv:document.getElementById('cvv').value,
-      name:document.getElementById('name').value,amount:'${amount}',locationId:'${locationId}',invoiceId:'${invoiceId}'})});
-      const d=await r.json();
-      if(d.success){window.parent.postMessage({type:'payment_success',transactionId:d.transactionId},'*');}
-      else{alert('Payment failed: '+d.error);}
+      const errEl = document.getElementById('errMsg');
+      errEl.textContent = '';
+
+      if(!paymentProps || !paymentProps.amount){
+        errEl.textContent = 'Payment details not received yet. Please wait a moment and try again.';
+        return;
+      }
+
+      setInputsEnabled(false);
+      document.getElementById('payBtn').textContent = 'Processing…';
+
+      try {
+        const r = await fetch('/payments/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cardNumber: document.getElementById('cn').value.replace(/\\s/g, ''),
+            expiry: document.getElementById('exp').value,
+            cvv: document.getElementById('cvv').value,
+            name: document.getElementById('name').value,
+            amount: paymentProps.amount,
+            locationId: paymentProps.locationId,
+            transactionId: paymentProps.transactionId,
+            orderId: paymentProps.orderId
+          })
+        });
+        const d = await r.json();
+
+        if(d.success){
+          window.parent.postMessage({ type: 'custom_element_success_response', chargeId: d.transactionId }, '*');
+        } else {
+          errEl.textContent = 'Payment failed: ' + (d.error || 'Please try again.');
+          window.parent.postMessage({ type: 'custom_element_error_response', error: { description: d.error || 'Payment failed' } }, '*');
+          setInputsEnabled(true);
+          document.getElementById('payBtn').textContent = 'Pay $' + Number(paymentProps.amount).toFixed(2);
+        }
+      } catch (e) {
+        errEl.textContent = 'Payment failed: ' + e.message;
+        window.parent.postMessage({ type: 'custom_element_error_response', error: { description: e.message } }, '*');
+        setInputsEnabled(true);
+        document.getElementById('payBtn').textContent = 'Pay $' + Number(paymentProps.amount).toFixed(2);
+      }
     }
     </script></body></html>`);
 });
 
 // ─── PROCESS PAYMENT ──────────────────────────────────────────────────────────
 app.post('/payments/process', async (req, res) => {
-  const { cardNumber, expiry, cvv, name, amount, locationId } = req.body;
+  const { cardNumber, expiry, cvv, name, amount, locationId, transactionId, orderId } = req.body;
+  console.log(`Processing charge - amount: ${amount}, locationId: ${locationId}, ghlTransactionId: ${transactionId}, orderId: ${orderId}`);
   try {
     const [m, y] = expiry.split('/');
     const locData = locationStore[locationId] || {};
@@ -537,7 +605,7 @@ app.post('/payments/process', async (req, res) => {
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v3.9 running on port ${PORT}`);
+  console.log(`Patriot Payments GHL Server v4.0 running on port ${PORT}`);
   console.log(`BASE_URL: ${BASE_URL}`);
   console.log(`APP_ID: ${APP_ID}`);
   console.log(`Store path: ${STORE_PATH}`);
