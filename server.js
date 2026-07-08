@@ -1,8 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
 const app = express();
 
 app.use(express.json());
@@ -16,38 +15,54 @@ const {
   ACCEPT_BLUE_BASE_URL,
   API_KEY,
   SSO_KEY,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
   PORT = 3000
 } = process.env;
 
 const BASE_URL = (process.env.BASE_URL || 'https://patriot-payments-ghl.onrender.com').replace(/\/$/, '');
 const APP_ID = GHL_CLIENT_ID ? GHL_CLIENT_ID.split('-').slice(0, -1).join('-') : '';
 
-// ─── PERSISTENT STORE ─────────────────────────────────────────────────────────
-function getStorePath() {
-  const preferred = '/opt/render/project/src/location_store.json';
+// ─── PERSISTENT STORE (Supabase) ───────────────────────────────────────────────
+// Replaces the old location_store.json file, which lived on Render's ephemeral
+// build filesystem and was wiped on every deploy — silently disconnecting every
+// installed merchant. This now persists in Postgres and survives deploys.
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('WARNING: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — location store will not persist!');
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+async function loadStore() {
   try {
-    fs.accessSync(path.dirname(preferred), fs.constants.W_OK);
-    return preferred;
-  } catch {
-    return path.join('/tmp', 'location_store.json');
+    const { data, error } = await supabase.from('location_store').select('key, value');
+    if (error) throw error;
+    const store = {};
+    (data || []).forEach(row => { store[row.key] = row.value; });
+    return store;
+  } catch (e) {
+    console.error('Failed to load store from Supabase:', e.message);
+    return {};
   }
 }
-const STORE_PATH = getStorePath();
-console.log(`Using store path: ${STORE_PATH}`);
 
-function loadStore() {
+// Full-replace sync: deletes all rows then re-inserts the current in-memory
+// store. The store is small (one row per merchant location), so this is cheap
+// and avoids ever leaving stale/deleted keys behind in the DB.
+async function saveStore(store) {
   try {
-    if (fs.existsSync(STORE_PATH)) return JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
-  } catch (e) { console.error('Failed to load store:', e.message); }
-  return {};
+    const rows = Object.entries(store).map(([key, value]) => ({ key, value }));
+    const { error: delErr } = await supabase.from('location_store').delete().neq('key', '');
+    if (delErr) throw delErr;
+    if (rows.length) {
+      const { error: insErr } = await supabase.from('location_store').insert(rows);
+      if (insErr) throw insErr;
+    }
+  } catch (e) {
+    console.error('Failed to save store to Supabase:', e.message);
+  }
 }
 
-function saveStore(store) {
-  try { fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)); }
-  catch (e) { console.error('Failed to save store:', e.message); }
-}
-
-let locationStore = loadStore();
+let locationStore = {};
 
 // ─── BUILD HEADERS ────────────────────────────────────────────────────────────
 function buildHeaders(token) {
@@ -165,9 +180,9 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.0.0',
+    version: '4.1.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
-    store_path: STORE_PATH,
+    store_backend: 'supabase',
     base_url: BASE_URL
   });
 });
@@ -217,7 +232,7 @@ app.get('/oauth/callback', async (req, res) => {
       locationStore[locationId] = { ...entry, locationId };
       locationStore[`company_${locationId}`] = { ...entry, companyId };
     }
-    saveStore(locationStore);
+    await saveStore(locationStore);
     console.log(`Token stored for companyId: ${companyId}${locationId ? `, locationId: ${locationId}` : ''}`);
 
     if (isBulk || userType === 'Company') {
@@ -231,7 +246,7 @@ app.get('/oauth/callback', async (req, res) => {
         const providerResult = await createProviderConfigWithToken(locationId, accessToken);
         console.log('✅ Provider config complete:', JSON.stringify(providerResult));
         locationStore[locationId].providerId = providerResult?._id || providerResult?.id;
-        saveStore(locationStore);
+        await saveStore(locationStore);
       } catch (provErr) {
         console.error('Provider config FAILED:', JSON.stringify(provErr?.response?.data || provErr.message));
         console.error('Status:', provErr?.response?.status);
@@ -287,7 +302,7 @@ app.post('/webhooks/install', async (req, res) => {
     locationStore[locationId] = { access_token: companyToken, companyId, locationId };
   }
   locationStore[`company_${locationId}`] = { access_token: companyToken, companyId };
-  saveStore(locationStore);
+  await saveStore(locationStore);
 
   await new Promise(resolve => setTimeout(resolve, 5000));
 
@@ -298,7 +313,7 @@ app.post('/webhooks/install', async (req, res) => {
       providerId: providerResult?._id || providerResult?.id,
       installed_at: new Date().toISOString()
     };
-    saveStore(locationStore);
+    await saveStore(locationStore);
     console.log(`✅ Provider config complete for locationId: ${locationId}`);
   } catch (e) {
     console.error(`Webhook install FAILED for ${locationId}:`, JSON.stringify(e?.response?.data || e.message), 'Status:', e?.response?.status);
@@ -306,12 +321,12 @@ app.post('/webhooks/install', async (req, res) => {
 });
 
 // ─── UNINSTALL WEBHOOK ────────────────────────────────────────────────────────
-app.post('/webhooks/uninstall', (req, res) => {
+app.post('/webhooks/uninstall', async (req, res) => {
   const { locationId, companyId } = req.body;
   console.log(`=== UNINSTALL WEBHOOK === locationId: ${locationId}, companyId: ${companyId}`);
   if (locationId && locationStore[locationId]) { delete locationStore[locationId]; }
   if (locationId && locationStore[`company_${locationId}`]) { delete locationStore[`company_${locationId}`]; }
-  saveStore(locationStore);
+  await saveStore(locationStore);
   res.status(200).json({ success: true });
 });
 
@@ -330,7 +345,7 @@ app.post('/webhooks', async (req, res) => {
       locationStore[locationId] = { access_token: companyToken, companyId, locationId };
     }
     locationStore[`company_${locationId}`] = { access_token: companyToken, companyId };
-    saveStore(locationStore);
+    await saveStore(locationStore);
 
     await new Promise(resolve => setTimeout(resolve, 5000));
     try {
@@ -340,7 +355,7 @@ app.post('/webhooks', async (req, res) => {
         providerId: result?._id || result?.id,
         installed_at: new Date().toISOString()
       };
-      saveStore(locationStore);
+      await saveStore(locationStore);
       console.log(`✅ Provider config via generic webhook for ${locationId}`);
     } catch (e) {
       console.error(`Generic webhook install failed:`, JSON.stringify(e?.response?.data || e.message));
@@ -360,7 +375,7 @@ app.post('/admin/register', async (req, res) => {
   if (!locationToken) return res.status(404).json({ error: 'no token found — reinstall app first' });
   locationStore[locationId] = locationStore[locationId] || { access_token: locationToken, companyId: 'oWY1LzuHYhbViH7xCOQl', locationId };
   locationStore[`company_${locationId}`] = { access_token: locationToken, companyId: 'oWY1LzuHYhbViH7xCOQl' };
-  saveStore(locationStore);
+  await saveStore(locationStore);
   console.log(`=== ADMIN REGISTER triggered for locationId: ${locationId} ===`);
   try {
     const result = await createProviderConfigWithToken(locationId, locationToken);
@@ -416,7 +431,7 @@ app.get('/setup', (req, res) => {
 });
 
 // ─── SAVE CREDENTIALS ─────────────────────────────────────────────────────────
-app.post('/setup/save', (req, res) => {
+app.post('/setup/save', async (req, res) => {
   const { apiKey, sourceKey, mode, ssoToken } = req.body;
   let locationId = null;
   try {
@@ -426,7 +441,7 @@ app.post('/setup/save', (req, res) => {
     locationStore[locationId].acceptBlueApiKey = apiKey;
     locationStore[locationId].acceptBlueSourceKey = sourceKey;
     locationStore[locationId].mode = mode;
-    saveStore(locationStore);
+    await saveStore(locationStore);
     console.log(`Credentials saved for ${locationId}`);
   }
   res.json({ success: true });
@@ -604,9 +619,14 @@ app.post('/payments/process', async (req, res) => {
 });
 
 // ─── START SERVER ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`Patriot Payments GHL Server v4.0 running on port ${PORT}`);
-  console.log(`BASE_URL: ${BASE_URL}`);
-  console.log(`APP_ID: ${APP_ID}`);
-  console.log(`Store path: ${STORE_PATH}`);
-});
+(async () => {
+  locationStore = await loadStore();
+  console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
+
+  app.listen(PORT, () => {
+    console.log(`Patriot Payments GHL Server v4.1 running on port ${PORT}`);
+    console.log(`BASE_URL: ${BASE_URL}`);
+    console.log(`APP_ID: ${APP_ID}`);
+    console.log(`Store backend: Supabase`);
+  });
+})();
