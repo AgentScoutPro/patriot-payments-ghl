@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.1.0',
+    version: '4.2.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -522,19 +522,38 @@ app.get('/payments/checkout', (req, res) => {
       <div><label>CVV</label><input type="text" id="cvv" placeholder="123" maxlength="4" disabled/></div>
     </div>
     <label>Name on Card</label><input type="text" id="name" placeholder="Full name" disabled/>
+    <label>Billing Address</label><input type="text" id="street" placeholder="123 Main St" disabled/>
+    <div class="row">
+      <div><label>City</label><input type="text" id="city" placeholder="City" disabled/></div>
+      <div><label>State</label><input type="text" id="state" placeholder="AZ" maxlength="2" style="text-transform:uppercase" disabled/></div>
+      <div><label>ZIP</label><input type="text" id="zip" placeholder="85234" maxlength="10" disabled/></div>
+    </div>
     <button class="btn" id="payBtn" onclick="pay()" disabled>Loading…</button>
     <p class="err" id="errMsg"></p>
     <p class="secure">🔒 Secured by Patriot Payments & Accept Blue</p></div>
     <script>
     let paymentProps = null;
+    let resolvedFromMessage = false;
 
     function setInputsEnabled(enabled){
-      ['cn','exp','cvv','name','payBtn'].forEach(id=>{
+      ['cn','exp','cvv','name','street','city','state','zip','payBtn'].forEach(id=>{
         document.getElementById(id).disabled = !enabled;
       });
     }
 
-    // GHL only sends payment_initiate_props AFTER it sees this ready event.
+    function applyPaymentProps(props){
+      paymentProps = props;
+      const amt = Number(props.amount || 0).toFixed(2);
+      document.getElementById('amountDisplay').textContent = '$' + amt;
+      document.getElementById('payBtn').textContent = 'Pay $' + amt;
+      setInputsEnabled(true);
+    }
+
+    // GHL only sends payment_initiate_props AFTER it sees this ready event —
+    // but only when this page is actually embedded in a GHL iframe. Some
+    // invoice "pay now" links open this page as a top-level navigation
+    // instead, where there's no real parent to respond, so this message
+    // goes nowhere.
     window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
 
     window.addEventListener('message', function(event){
@@ -542,13 +561,30 @@ app.get('/payments/checkout', (req, res) => {
       if(!data || !data.type) return;
 
       if(data.type === 'payment_initiate_props'){
-        paymentProps = data;
-        const amt = Number(data.amount || 0).toFixed(2);
-        document.getElementById('amountDisplay').textContent = '$' + amt;
-        document.getElementById('payBtn').textContent = 'Pay $' + amt;
-        setInputsEnabled(true);
+        resolvedFromMessage = true;
+        applyPaymentProps(data);
       }
     });
+
+    // Fallback: if no postMessage arrives quickly (top-level navigation case,
+    // or a slow/misconfigured parent), fall back to reading params directly
+    // from the URL instead of leaving the page stuck on "Loading…" forever.
+    setTimeout(function(){
+      if (resolvedFromMessage) return;
+      const params = new URLSearchParams(window.location.search);
+      const amount = params.get('amount');
+      if (amount) {
+        applyPaymentProps({
+          amount: amount,
+          locationId: params.get('locationId'),
+          transactionId: params.get('transactionId') || params.get('invoiceId'),
+          orderId: params.get('orderId')
+        });
+      } else {
+        document.getElementById('amountDisplay').textContent = 'Unable to load';
+        document.getElementById('errMsg').textContent = 'We couldn\'t load your payment details. Please reopen this payment link from your invoice, or contact the merchant.';
+      }
+    }, 2500);
 
     async function pay(){
       const errEl = document.getElementById('errMsg');
@@ -556,6 +592,13 @@ app.get('/payments/checkout', (req, res) => {
 
       if(!paymentProps || !paymentProps.amount){
         errEl.textContent = 'Payment details not received yet. Please wait a moment and try again.';
+        return;
+      }
+
+      const street = document.getElementById('street').value.trim();
+      const zip = document.getElementById('zip').value.trim();
+      if(!street || !zip){
+        errEl.textContent = 'Billing address and ZIP are required.';
         return;
       }
 
@@ -571,6 +614,10 @@ app.get('/payments/checkout', (req, res) => {
             expiry: document.getElementById('exp').value,
             cvv: document.getElementById('cvv').value,
             name: document.getElementById('name').value,
+            street: street,
+            city: document.getElementById('city').value.trim(),
+            state: document.getElementById('state').value.trim(),
+            zip: zip,
             amount: paymentProps.amount,
             locationId: paymentProps.locationId,
             transactionId: paymentProps.transactionId,
@@ -599,16 +646,27 @@ app.get('/payments/checkout', (req, res) => {
 
 // ─── PROCESS PAYMENT ──────────────────────────────────────────────────────────
 app.post('/payments/process', async (req, res) => {
-  const { cardNumber, expiry, cvv, name, amount, locationId, transactionId, orderId } = req.body;
+  const { cardNumber, expiry, cvv, name, street, city, state, zip, amount, locationId, transactionId, orderId } = req.body;
   console.log(`Processing charge - amount: ${amount}, locationId: ${locationId}, ghlTransactionId: ${transactionId}, orderId: ${orderId}`);
   try {
     const [m, y] = expiry.split('/');
     const locData = locationStore[locationId] || {};
     const apiKey = locData.acceptBlueApiKey || ACCEPT_BLUE_API_KEY;
     const baseUrl = ACCEPT_BLUE_BASE_URL || 'https://api.accept.blue/api/v2';
+    const nameParts = (name || '').trim().split(/\s+/);
+    const first_name = nameParts[0] || '';
+    const last_name = nameParts.slice(1).join(' ') || first_name;
     const r = await axios.post(
       `${baseUrl}/transactions/charge`,
-      { amount: parseFloat(amount), card: { number: cardNumber, expiry_month: parseInt(m), expiry_year: parseInt('20'+y), cvv2: cvv, name } },
+      {
+        amount: parseFloat(amount),
+        card: { number: cardNumber, expiry_month: parseInt(m), expiry_year: parseInt('20'+y), cvv2: cvv, name },
+        // AVS: matches billing address against the card issuer's records to
+        // help qualify the transaction for lower interchange rates and to
+        // strengthen chargeback defense (proof the billing address was
+        // collected and verified at time of sale).
+        billing_info: { first_name, last_name, street, city, state, zip, country: 'US' }
+      },
       { headers: { 'Authorization': `Basic ${Buffer.from(apiKey+':').toString('base64')}`, 'Content-Type': 'application/json' } }
     );
     res.json({ success: true, transactionId: r.data.reference_number, status: r.data.status });
@@ -624,7 +682,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.1 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.2 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
