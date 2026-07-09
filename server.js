@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.4.0',
+    version: '4.5.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -541,7 +541,7 @@ app.get('/payments/checkout', (req, res) => {
     const debugEl = document.getElementById('debugLine');
     function updateDebug(status){
       const inIframe = window.self !== window.top;
-      debugEl.textContent = 'v4.3 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
+      debugEl.textContent = 'v4.5 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
     }
     updateDebug('booting');
 
@@ -560,10 +560,13 @@ app.get('/payments/checkout', (req, res) => {
     }
 
     // GHL only sends payment_initiate_props AFTER it sees this ready event —
-    // but only when this page is actually embedded in a GHL iframe. Some
-    // invoice "pay now" links open this page as a top-level navigation
-    // instead, where there's no real parent to respond, so this message
-    // goes nowhere.
+    // but only when this page is actually embedded in a GHL iframe. GHL's own
+    // listener may not be attached the instant our script runs, so a single
+    // one-shot postMessage can get missed (race condition). Poll instead:
+    // keep re-sending custom_provider_ready until GHL responds, or we give up.
+    let readyInterval = setInterval(function(){
+      window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
+    }, 500);
     window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
     updateDebug('sent custom_provider_ready, waiting');
 
@@ -574,16 +577,19 @@ app.get('/payments/checkout', (req, res) => {
 
       if(data.type === 'payment_initiate_props'){
         resolvedFromMessage = true;
+        clearInterval(readyInterval);
         applyPaymentProps(data);
         updateDebug('resolved from postMessage');
       }
     });
 
-    // Fallback: if no postMessage arrives quickly (top-level navigation case,
-    // or a slow/misconfigured parent), fall back to reading params directly
-    // from the URL instead of leaving the page stuck on "Loading…" forever.
+    // Fallback: if no postMessage arrives after repeated tries (top-level
+    // navigation case, or a non-responding parent), fall back to reading
+    // params directly from the URL instead of leaving the page stuck on
+    // "Loading…" forever.
     setTimeout(function(){
       if (resolvedFromMessage) return;
+      clearInterval(readyInterval);
       const params = new URLSearchParams(window.location.search);
       const amount = params.get('amount');
       if (amount) {
@@ -599,7 +605,7 @@ app.get('/payments/checkout', (req, res) => {
         document.getElementById('errMsg').textContent = 'We could not load your payment details. Please reopen this payment link from your invoice, or contact the merchant.';
         updateDebug('fallback fired, no amount in URL either');
       }
-    }, 2500);
+    }, 8000);
 
     async function pay(){
       const errEl = document.getElementById('errMsg');
@@ -697,7 +703,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.4 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.5 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
