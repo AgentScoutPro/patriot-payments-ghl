@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.6.0',
+    version: '4.7.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -424,8 +424,9 @@ app.get('/setup', (req, res) => {
       const mode=document.getElementById('mode').value;
       if(!apiKey||!sourceKey){alert('Please enter both keys');return;}
       const res=await fetch('/setup/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({apiKey,sourceKey,mode,ssoToken:'${sso_token}'})});
-      if(res.ok){document.getElementById('successMsg').style.display='block';}
-      else{alert('Error saving. Please try again.');}
+      const d=await res.json().catch(()=>({}));
+      if(res.ok && d.success){document.getElementById('successMsg').style.display='block';}
+      else{alert('Error saving: ' + (d.error || 'Please try again.'));}
     }
     </script></body></html>`);
 });
@@ -437,13 +438,21 @@ app.post('/setup/save', async (req, res) => {
   try {
     if (ssoToken && SSO_KEY) { const d = decryptSSOToken(ssoToken); locationId = d?.activeLocation; }
   } catch (e) { console.error('SSO error:', e.message); }
-  if (locationId && locationStore[locationId]) {
-    locationStore[locationId].acceptBlueApiKey = apiKey;
-    locationStore[locationId].acceptBlueSourceKey = sourceKey;
-    locationStore[locationId].mode = mode;
-    await saveStore(locationStore);
-    console.log(`Credentials saved for ${locationId}`);
+
+  if (!locationId) {
+    console.error('setup/save failed: could not resolve locationId from SSO token');
+    return res.status(400).json({ success: false, error: 'Could not verify your GHL session. Please refresh this page from inside GHL and try again.' });
   }
+  if (!locationStore[locationId]) {
+    console.error(`setup/save failed: locationId ${locationId} not found in store (location may need to reinstall the app)`);
+    return res.status(400).json({ success: false, error: 'This location isn\u2019t recognized yet. Please reinstall/reconnect the app from GHL\u2019s Payments > Integrations page first.' });
+  }
+
+  locationStore[locationId].acceptBlueApiKey = apiKey;
+  locationStore[locationId].acceptBlueSourceKey = sourceKey;
+  locationStore[locationId].mode = mode;
+  await saveStore(locationStore);
+  console.log(`Credentials saved for ${locationId}`);
   res.json({ success: true });
 });
 
@@ -698,8 +707,20 @@ app.post('/payments/process', async (req, res) => {
     );
     res.json({ success: true, transactionId: r.data.reference_number, status: r.data.status });
   } catch (err) {
-    console.error('Payment error:', err?.response?.data || err.message);
-    res.status(500).json({ success: false, error: 'Payment processing failed' });
+    const gatewayError = err?.response?.data;
+    console.error('Payment error:', gatewayError || err.message);
+
+    if (gatewayError) {
+      // Accept Blue responded, just declined/rejected the charge — this is a
+      // normal business outcome, not a server failure, so 402 is the correct
+      // status rather than 500. Surface their reason when they give us one.
+      const reason = gatewayError.message || gatewayError.error || 'Payment was declined';
+      res.status(402).json({ success: false, error: reason });
+    } else {
+      // No response from the gateway at all (network/timeout/DNS/etc.) —
+      // this is a genuine server-side problem.
+      res.status(500).json({ success: false, error: 'Payment processing failed. Please try again.' });
+    }
   }
 });
 
@@ -709,7 +730,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.6 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.7.0 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
