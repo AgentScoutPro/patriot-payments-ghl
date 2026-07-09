@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.5.0',
+    version: '4.6.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -541,7 +541,7 @@ app.get('/payments/checkout', (req, res) => {
     const debugEl = document.getElementById('debugLine');
     function updateDebug(status){
       const inIframe = window.self !== window.top;
-      debugEl.textContent = 'v4.5 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
+      debugEl.textContent = 'v4.6 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
     }
     updateDebug('booting');
 
@@ -565,13 +565,19 @@ app.get('/payments/checkout', (req, res) => {
     // one-shot postMessage can get missed (race condition). Poll instead:
     // keep re-sending custom_provider_ready until GHL responds, or we give up.
     let readyInterval = setInterval(function(){
-      window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
+      window.parent.postMessage(JSON.stringify({ type: 'custom_provider_ready', loaded: true }), '*');
     }, 500);
-    window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
+    window.parent.postMessage(JSON.stringify({ type: 'custom_provider_ready', loaded: true }), '*');
     updateDebug('sent custom_provider_ready, waiting');
 
     window.addEventListener('message', function(event){
-      const data = event.data;
+      let data = event.data;
+      // GHL's own listener expects JSON strings (that's what broke our
+      // outgoing messages), so their responses are likely also stringified
+      // rather than raw objects. Handle both to be safe.
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch (e) { return; }
+      }
       updateDebug('received message: ' + JSON.stringify(data).slice(0, 80));
       if(!data || !data.type) return;
 
@@ -648,16 +654,16 @@ app.get('/payments/checkout', (req, res) => {
         const d = await r.json();
 
         if(d.success){
-          window.parent.postMessage({ type: 'custom_element_success_response', chargeId: d.transactionId }, '*');
+          window.parent.postMessage(JSON.stringify({ type: 'custom_element_success_response', chargeId: d.transactionId }), '*');
         } else {
           errEl.textContent = 'Payment failed: ' + (d.error || 'Please try again.');
-          window.parent.postMessage({ type: 'custom_element_error_response', error: { description: d.error || 'Payment failed' } }, '*');
+          window.parent.postMessage(JSON.stringify({ type: 'custom_element_error_response', error: { description: d.error || 'Payment failed' } }), '*');
           setInputsEnabled(true);
           document.getElementById('payBtn').textContent = 'Pay $' + Number(paymentProps.amount).toFixed(2);
         }
       } catch (e) {
         errEl.textContent = 'Payment failed: ' + e.message;
-        window.parent.postMessage({ type: 'custom_element_error_response', error: { description: e.message } }, '*');
+        window.parent.postMessage(JSON.stringify({ type: 'custom_element_error_response', error: { description: e.message } }), '*');
         setInputsEnabled(true);
         document.getElementById('payBtn').textContent = 'Pay $' + Number(paymentProps.amount).toFixed(2);
       }
@@ -703,7 +709,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.5 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.6 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
