@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.2.0',
+    version: '4.3.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -499,6 +499,8 @@ app.post('/payments/query', (req, res) => {
 // iframe processes the charge -> iframe posts 'custom_element_success_response'
 // (or 'custom_element_error_response' / 'custom_element_close_response').
 app.get('/payments/checkout', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.set('Pragma', 'no-cache');
   res.send(`<!DOCTYPE html><html><head><title>Patriot Payments Checkout</title>
     <style>*{box-sizing:border-box;margin:0;padding:0;font-family:Arial,sans-serif;}
     body{background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;}
@@ -530,10 +532,18 @@ app.get('/payments/checkout', (req, res) => {
     </div>
     <button class="btn" id="payBtn" onclick="pay()" disabled>Loading…</button>
     <p class="err" id="errMsg"></p>
+    <p style="text-align:center;font-size:10px;color:#bbb;margin-top:8px;word-break:break-all;" id="debugLine"></p>
     <p class="secure">🔒 Secured by Patriot Payments & Accept Blue</p></div>
     <script>
     let paymentProps = null;
     let resolvedFromMessage = false;
+
+    const debugEl = document.getElementById('debugLine');
+    function updateDebug(status){
+      const inIframe = window.self !== window.top;
+      debugEl.textContent = 'v4.2 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
+    }
+    updateDebug('booting');
 
     function setInputsEnabled(enabled){
       ['cn','exp','cvv','name','street','city','state','zip','payBtn'].forEach(id=>{
@@ -555,14 +565,17 @@ app.get('/payments/checkout', (req, res) => {
     // instead, where there's no real parent to respond, so this message
     // goes nowhere.
     window.parent.postMessage({ type: 'custom_provider_ready', loaded: true }, '*');
+    updateDebug('sent custom_provider_ready, waiting');
 
     window.addEventListener('message', function(event){
       const data = event.data;
+      updateDebug('received message: ' + JSON.stringify(data).slice(0, 80));
       if(!data || !data.type) return;
 
       if(data.type === 'payment_initiate_props'){
         resolvedFromMessage = true;
         applyPaymentProps(data);
+        updateDebug('resolved from postMessage');
       }
     });
 
@@ -580,9 +593,11 @@ app.get('/payments/checkout', (req, res) => {
           transactionId: params.get('transactionId') || params.get('invoiceId'),
           orderId: params.get('orderId')
         });
+        updateDebug('resolved from URL fallback, amount=' + amount);
       } else {
         document.getElementById('amountDisplay').textContent = 'Unable to load';
         document.getElementById('errMsg').textContent = 'We couldn\'t load your payment details. Please reopen this payment link from your invoice, or contact the merchant.';
+        updateDebug('fallback fired, no amount in URL either');
       }
     }, 2500);
 
@@ -682,7 +697,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.2 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.3 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
