@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.3.0',
+    version: '4.4.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -541,7 +541,7 @@ app.get('/payments/checkout', (req, res) => {
     const debugEl = document.getElementById('debugLine');
     function updateDebug(status){
       const inIframe = window.self !== window.top;
-      debugEl.textContent = 'v4.2 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
+      debugEl.textContent = 'v4.3 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
     }
     updateDebug('booting');
 
@@ -596,7 +596,7 @@ app.get('/payments/checkout', (req, res) => {
         updateDebug('resolved from URL fallback, amount=' + amount);
       } else {
         document.getElementById('amountDisplay').textContent = 'Unable to load';
-        document.getElementById('errMsg').textContent = 'We couldn\'t load your payment details. Please reopen this payment link from your invoice, or contact the merchant.';
+        document.getElementById('errMsg').textContent = 'We could not load your payment details. Please reopen this payment link from your invoice, or contact the merchant.';
         updateDebug('fallback fired, no amount in URL either');
       }
     }, 2500);
@@ -697,7 +697,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.3 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.4 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
