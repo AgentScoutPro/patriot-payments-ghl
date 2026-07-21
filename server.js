@@ -180,7 +180,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.7.0',
+    version: '4.8.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -688,6 +688,10 @@ app.post('/payments/process', async (req, res) => {
     const [m, y] = expiry.split('/');
     const locData = locationStore[locationId] || {};
     const apiKey = locData.acceptBlueApiKey || ACCEPT_BLUE_API_KEY;
+    // Accept Blue requires the account PIN as the Basic Auth password —
+    // apiKey alone (empty password) returns Unauthorized even with a valid
+    // key. Confirmed via direct curl testing against their API on 7/9.
+    const pin = locData.acceptBlueSourceKey || '';
     const baseUrl = ACCEPT_BLUE_BASE_URL || 'https://api.accept.blue/api/v2';
     const nameParts = (name || '').trim().split(/\s+/);
     const first_name = nameParts[0] || '';
@@ -696,14 +700,20 @@ app.post('/payments/process', async (req, res) => {
       `${baseUrl}/transactions/charge`,
       {
         amount: parseFloat(amount),
-        card: { number: cardNumber, expiry_month: parseInt(m), expiry_year: parseInt('20'+y), cvv2: cvv, name },
+        // Accept Blue expects card as a flat string and expiry/cvv as
+        // top-level fields — NOT nested inside a card object. Confirmed via
+        // their validation error response on 7/9.
+        card: cardNumber,
+        expiry_month: parseInt(m),
+        expiry_year: parseInt('20'+y),
+        cvv2: cvv,
         // AVS: matches billing address against the card issuer's records to
         // help qualify the transaction for lower interchange rates and to
         // strengthen chargeback defense (proof the billing address was
         // collected and verified at time of sale).
         billing_info: { first_name, last_name, street, city, state, zip, country: 'US' }
       },
-      { headers: { 'Authorization': `Basic ${Buffer.from(apiKey+':').toString('base64')}`, 'Content-Type': 'application/json' } }
+      { headers: { 'Authorization': `Basic ${Buffer.from(apiKey+':'+pin).toString('base64')}`, 'Content-Type': 'application/json' } }
     );
     res.json({ success: true, transactionId: r.data.reference_number, status: r.data.status });
   } catch (err) {
@@ -713,11 +723,12 @@ app.post('/payments/process', async (req, res) => {
     if (gatewayError) {
       // Accept Blue responded, just declined/rejected the charge — this is a
       // normal business outcome, not a server failure, so 402 is the correct
-      // status rather than 500. Surface their reason when they give us one.
-      const reason = gatewayError.message || gatewayError.error || 'Payment was declined';
+      // status rather than 500. Their actual field is error_message.
+      const reason = gatewayError.error_message || gatewayError.message || gatewayError.error || 'Payment was declined';
       res.status(402).json({ success: false, error: reason });
     } else {
       // No response from the gateway at all (network/timeout/DNS/etc.) —
+
       // this is a genuine server-side problem.
       res.status(500).json({ success: false, error: 'Payment processing failed. Please try again.' });
     }
@@ -730,7 +741,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.7.0 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.8.0 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
