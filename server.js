@@ -34,7 +34,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 async function loadStore() {
   try {
-    const { data, error } = await supabase.from('location_store').select('key, value');
+    // Excludes "txn_" keys — those are transaction snapshots (for GHL's
+    // verify step), not merchant location records, and shouldn't be loaded
+    // into the in-memory locationStore or counted in the boot log.
+    const { data, error } = await supabase.from('location_store').select('key, value').not('key', 'like', 'txn_%');
     if (error) throw error;
     const store = {};
     (data || []).forEach(row => { store[row.key] = row.value; });
@@ -45,13 +48,41 @@ async function loadStore() {
   }
 }
 
+// Transaction snapshots (for GHL's verify step) — stored as individual rows
+// in the same location_store table under a "txn_" key prefix, so no schema
+// migration is needed. Uses direct upsert/select rather than the full-replace
+// saveStore() below, since transaction volume shouldn't wipe/rewrite every row
+// on every charge.
+async function saveTransaction(chargeId, snapshot) {
+  try {
+    const { error } = await supabase.from('location_store').upsert({ key: `txn_${chargeId}`, value: snapshot });
+    if (error) throw error;
+  } catch (e) {
+    console.error('Failed to save transaction snapshot:', e.message);
+  }
+}
+
+async function loadTransaction(chargeId) {
+  try {
+    const { data, error } = await supabase.from('location_store').select('value').eq('key', `txn_${chargeId}`).maybeSingle();
+    if (error) throw error;
+    return data?.value || null;
+  } catch (e) {
+    console.error('Failed to load transaction snapshot:', e.message);
+    return null;
+  }
+}
+
 // Full-replace sync: deletes all rows then re-inserts the current in-memory
 // store. The store is small (one row per merchant location), so this is cheap
 // and avoids ever leaving stale/deleted keys behind in the DB.
 async function saveStore(store) {
   try {
     const rows = Object.entries(store).map(([key, value]) => ({ key, value }));
-    const { error: delErr } = await supabase.from('location_store').delete().neq('key', '');
+    // Scoped to exclude "txn_" keys — this used to be an unconditional
+    // delete-all, which would silently wipe every saved transaction snapshot
+    // (used for GHL's verify step) any time a merchant reconnected/updated.
+    const { error: delErr } = await supabase.from('location_store').delete().neq('key', '').not('key', 'like', 'txn_%');
     if (delErr) throw delErr;
     if (rows.length) {
       const { error: insErr } = await supabase.from('location_store').insert(rows);
@@ -180,7 +211,7 @@ function findCompanyToken(companyId) {
 app.get('/', (req, res) => {
   res.json({
     status: 'Patriot Payments GHL Integration Server Running',
-    version: '4.8.0',
+    version: '4.9.0',
     locations_connected: Object.keys(locationStore).filter(k => !k.startsWith('company_')).length,
     store_backend: 'supabase',
     base_url: BASE_URL
@@ -489,13 +520,30 @@ app.get('/getting-started', (req, res) => {
 });
 
 // ─── QUERY URL ────────────────────────────────────────────────────────────────
-app.post('/payments/query', (req, res) => {
+app.post('/payments/query', async (req, res) => {
   const key = req.headers['x-api-key'] || req.body.apiKey;
   if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
-  const { type, transactionId } = req.body;
-  console.log(`Query - type: ${type}, transaction: ${transactionId}`);
+  const { type, transactionId, chargeId } = req.body;
+  const lookupId = chargeId || transactionId;
+  console.log(`Query - type: ${type}, transaction: ${lookupId}`);
   switch (type) {
-    case 'verify': return res.json({ success: true, status: 'verified', transactionId });
+    case 'verify': {
+      // Per GHL's current custom-provider spec, verify wants a MINIMAL
+      // response — {"success": true} / {"failed": true} / {"success": false}
+      // for pending — NOT the chargeSnapshot object (that's only for the
+      // separate charge_payment/off-session flow). We still look up our
+      // saved snapshot so we can confirm the charge is one we actually
+      // processed and log the amount for support/debugging, but the body we
+      // send back to GHL stays minimal and spec-exact.
+      const snapshot = await loadTransaction(lookupId);
+      if (snapshot) {
+        console.log(`Verify OK - chargeId ${lookupId}, amount ${snapshot.amount}, status ${snapshot.status}`);
+        return res.json({ success: true });
+      }
+      // No record of this charge on our side — don't blindly confirm it.
+      console.error(`Verify called for unknown chargeId: ${lookupId}`);
+      return res.json({ success: false });
+    }
     case 'refund': return res.json({ success: true, status: 'refunded', transactionId });
     default: return res.json({ success: true, type, received: true });
   }
@@ -550,7 +598,7 @@ app.get('/payments/checkout', (req, res) => {
     const debugEl = document.getElementById('debugLine');
     function updateDebug(status){
       const inIframe = window.self !== window.top;
-      debugEl.textContent = 'v4.6 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
+      debugEl.textContent = 'v4.9 | ' + status + ' | inIframe=' + inIframe + ' | query="' + window.location.search + '"';
     }
     updateDebug('booting');
 
@@ -566,6 +614,13 @@ app.get('/payments/checkout', (req, res) => {
       document.getElementById('amountDisplay').textContent = '$' + amt;
       document.getElementById('payBtn').textContent = 'Pay $' + amt;
       setInputsEnabled(true);
+      // Prefill from GHL's own contact record instead of leaving this blank —
+      // this is what was causing customer names to be missing/inconsistent in
+      // Accept Blue's transaction reports (customers often didn't retype it,
+      // or typed something different than their actual account name).
+      if (props.contact && props.contact.name) {
+        document.getElementById('name').value = props.contact.name;
+      }
     }
 
     // GHL only sends payment_initiate_props AFTER it sees this ready event —
@@ -715,7 +770,19 @@ app.post('/payments/process', async (req, res) => {
       },
       { headers: { 'Authorization': `Basic ${Buffer.from(apiKey+':'+pin).toString('base64')}`, 'Content-Type': 'application/json' } }
     );
-    res.json({ success: true, transactionId: r.data.reference_number, status: r.data.status });
+    // Save a spec-shaped chargeSnapshot now, keyed by the chargeId we hand
+    // back to GHL — GHL calls /payments/query with type "verify" and this
+    // exact chargeId right after receiving custom_element_success_response,
+    // and expects a chargeSnapshot back or it won't mark the invoice paid.
+    const chargeId = r.data.reference_number;
+    await saveTransaction(chargeId, {
+      id: chargeId,
+      status: 'succeeded',
+      amount: parseFloat(amount),
+      chargeId: chargeId,
+      chargedAt: Math.floor(Date.now() / 1000)
+    });
+    res.json({ success: true, transactionId: chargeId, status: r.data.status });
   } catch (err) {
     const gatewayError = err?.response?.data;
     console.error('Payment error:', gatewayError || err.message);
@@ -741,7 +808,7 @@ app.post('/payments/process', async (req, res) => {
   console.log(`Loaded ${Object.keys(locationStore).length} store entries from Supabase`);
 
   app.listen(PORT, () => {
-    console.log(`Patriot Payments GHL Server v4.8.0 running on port ${PORT}`);
+    console.log(`Patriot Payments GHL Server v4.9.0 running on port ${PORT}`);
     console.log(`BASE_URL: ${BASE_URL}`);
     console.log(`APP_ID: ${APP_ID}`);
     console.log(`Store backend: Supabase`);
